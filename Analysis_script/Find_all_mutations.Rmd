@@ -1,0 +1,580 @@
+---
+title: "Find All SF3B1 mutations"
+author: "Hongke Peng"
+date: "2023-12-11"
+output: html_document
+---
+
+#load library
+```{r}
+library(SingleCellExperiment)
+library(clusterProfiler)
+library(dittoSeq)
+library(DropletUtils)
+library(dplyr)
+library(ggplot2)
+library(Seurat)
+library(ggpointdensity)
+library(harmony)
+library(transPlotR)
+library(biomaRt)
+library(Seurat)
+library(SingleCellExperiment)
+```
+
+#add mut assay to srt
+
+```{r}
+sr <- readRDS("make_srt_object/sr_data.rds")
+```
+
+
+```{r}
+mut_ls <- list()
+ref_ls <- list()
+for(i in c("CLL156","CLL5309","CLL5602","CLL5305","CLL5306","CLL108",
+           "CLL141v","CLL141i","CLL153","CLL63i","CLL63v","CLL232","CLL152","CLL318","CLL155","CLL170i", "CLL170v", "CLL175",
+           "HD11","HD12","HD14")) {
+  mut_pathway <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_bam/", i, "_mutation/alt_cnt.csv.gz") 
+  x <- read.csv(mut_pathway)
+  rownames(x) <- paste(x$chr, x$position, sep = "_")
+  x$chr <- NULL
+  x$position <- NULL
+  colnames(x) <- paste0(i, "_", colnames(x), "-1")
+  keep_cell <- colnames(x)[colnames(x) %in% colnames(sr)]
+  x <- x[, keep_cell]
+  #x$mutation <- rownames(x)
+  mut_ls[[i]] <- x
+  
+  ref_pathway <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_bam/", i, "_mutation/ref_cnt.csv.gz") 
+  x <- read.csv(ref_pathway)
+  rownames(x) <- paste(x$chr, x$position, sep = "_")
+  x$chr <- NULL
+  x$position <- NULL
+  colnames(x) <- paste0(i, "_", colnames(x), "-1")
+  keep_cell <- colnames(x)[colnames(x) %in% colnames(sr)]
+  x <- x[, keep_cell]
+  ref_ls[[i]] <- x
+}
+
+# this is too slow
+# I think the best is to find the mut cells and pull them out, instead of add a new assay to srt object
+#mut_mtx_assay <- mut_ls[["CLL156"]]
+
+#for (i in c("CLL5309","CLL5602","CLL5305","CLL5306","CLL141v","CLL141i","CLL153","CLL63i","CLL63v","CLL232","CLL318","CLL155","CLL170i", "CLL170v", "CLL175","HD11","HD12","HD14")) {
+#  print(i)
+#  tmp <- mut_ls[[i]]
+#  mut_mtx_assay <- dplyr::full_join(mut_mtx_assay,  tmp, by = "mutation")
+#}
+
+#rownames(mut_mtx_assay) <- mut_mtx_assay$mutation
+#mut_mtx_assay$mutation <- NULL
+#mut_mtx_assay[is.na(mut_mtx_assay)] <- 0
+```
+
+
+#unfiltered data, what is the top altered bases
+Aims: bubble plot of altered bases in SF3B1-K700E/WT CLL/HD group
+
+##For all samples
+```{r,fig.width=6, fig.height=5}
+sample.ls <- c("CLL156","CLL5309","CLL5602","CLL5305","CLL5306","CLL108",
+           "CLL141v","CLL141i","CLL153","CLL63i","CLL63v","CLL232","CLL152","CLL318","CLL155","CLL170i", "CLL170v", "CLL175",
+           "HD11","HD12","HD14")
+
+sample.ls <- c("CLL156","CLL5306","CLL153","CLL155")
+
+sum_umi_mtx <- list()
+for(i in sample.ls) {
+  x <- mut_ls[[i]]
+  y <- ref_ls[[i]]
+  df <- data.frame(alt_umi = rowSums(x), 
+                   ref_umi = rowSums(y))
+  colnames(df) <- paste(i, colnames(df), sep = "_")
+  df$position <- rownames(df)
+  sum_umi_mtx[[i]] <- df
+}
+
+df <- sum_umi_mtx[["CLL156"]]
+for(i in sample.ls[2:length(sample.ls)]) {
+  tmp <- sum_umi_mtx[[i]]
+  df <- dplyr::full_join(df, tmp, by = "position")
+}
+df[is.na(df)] <- 0
+rownames(df) <- df$position
+df$position <- NULL
+
+alt_df <- df[, grepl("alt", colnames(df))]
+ref_df <- df[, grepl("ref", colnames(df))]
+df <- data.frame(alt_umi = rowSums(alt_df), 
+                 ref_umi = rowSums(ref_df))
+df$position <- rownames(df)
+# there are some position with a very small read coverage
+df$coverage <- df$alt_umi + df$ref_umi
+keep <- (df$alt_umi > 1000) | (df$ref_umi > 1000)
+df <- df[keep, ]
+df$alt_frac <- df$alt_umi / (df$alt_umi + df$ref_umi)
+df$group <- "other"
+df$group[df$position == "chr2_197402109"] <- "K700E"
+
+#df <- df[!(rownames(df) %in% c("chr2_197405143", "chr2_197405146")),]
+ggplot(df, aes(y = ref_umi, x = alt_umi, size = alt_frac, color = group)) +
+  geom_point(alpha=0.7) + 
+  scale_color_manual(values = c("orange", "grey70")) +
+  scale_radius(range = c(1, 12), breaks=c(0.1, 0.2, 0.3, 0.4)) + 
+  xlab("ref UMIs") + 
+  ylab("alt UMIs") + 
+  ggtitle("Altered bases in all samples") + 
+  #xlim(c(0, 120000)) + 
+  #ylim(c(0, 120000)) +
+  theme_classic()
+
+ggplot(df, aes(y = ref_umi, x = alt_umi, size = coverage)) +
+  geom_point(alpha=0.7, color="grey70") + 
+  geom_text(aes(label = position, vjust = 1.5), size = 3) + 
+  #scale_color_manual(values = c("grey70")) +
+  scale_radius(range = c(1, 12), breaks=c(0.1, 0.2, 0.3, 0.4)) + 
+  xlab("UMIs with altered SF3B1") + 
+  ylab("UMIs with reference SF3B1") + 
+  ggtitle("Altered bases in SF3B1") + 
+  #xlim(c(0, 120000)) + 
+  #ylim(c(0, 120000)) +
+  theme_classic()
+#ggsave("find_all_mutation_fig/bubble_K700E_group_sizebycounts.pdf", width = 6, height = 5)
+
+ggplot(df, aes(y = ref_umi, x = alt_umi, size = alt_frac)) +
+  geom_point(alpha=0.7, color="grey70") + 
+  geom_text(aes(label = position, vjust = 1.5), size = 3) + 
+  #scale_color_manual(values = c("grey70")) +
+  scale_radius(range = c(1, 12), breaks=c(0.1, 0.2, 0.3, 0.4)) + 
+  xlab("UMIs with altered SF3B1") + 
+  ylab("UMIs with reference SF3B1") + 
+  ggtitle("Altered bases in SF3B1") + 
+  #xlim(c(0, 120000)) + 
+  #ylim(c(0, 120000)) +
+  theme_classic()
+
+#ggsave("find_all_mutations_fig/bubble_K700E_group.pdf", width = 6, height = 5)
+```
+
+
+```{r, fig.width=10, fig.height=3}
+df <- df[order(df$alt_umi, decreasing = T), ]
+top_tr <- rownames(df)[1:8]
+top_df <- df[1:8, ]
+
+mut_ls <- data.frame()
+for(i in c("CLL156","CLL5309","CLL5602","CLL5305","CLL5306","CLL108",
+           "CLL141v","CLL141i","CLL153","CLL63i","CLL63v","CLL232","CLL152","CLL318","CLL155","CLL170i", "CLL170v", "CLL175",
+           "HD11","HD12","HD14")) {
+  mut_pathway <- paste0("/vast/scratch/users/peng.h/rachseq/fastq_polyA/filtered_bam/", i, "_mutation/allele_stat.csv.gz") 
+  x <- read.csv(mut_pathway)
+  x$location <- paste(x$chr, x$position, sep= "_")
+  x$sample <- i
+  x <- x[, c("sample","location","REF","ALT","REF_frequency")]
+  
+  sup_df <- data.frame(sample = i, 
+                       location = top_df$position, 
+                       REF = "X",
+                       ALT = "Y", 
+                       REF_frequency = 0)
+  
+  x <- full_join(x, sup_df, by = "location")
+  x <- x[x$location %in% top_tr, ]
+  x[is.na(x)] <- 0
+  x$sample.x <- i
+  x <- x[, c("sample.x","location","REF.x","ALT.x","REF_frequency.x")]
+  colnames(x) <- c("sample","location","REF","ALT","REF_frequency")
+  x$ALT_frequency <- 1 - x$REF_frequency
+  
+  mut_ls <- rbind(mut_ls, x)
+}
+mut_ls[mut_ls == 1] = 0
+
+ggplot(mut_ls, aes(x = location, y = ALT_frequency)) + 
+  geom_jitter(position = position_jitter(0.2), size = 1.8, color = "grey50") + 
+  theme_classic()
+#ggsave("find_all_mutation_fig/alt_freq.pdf", width = 10, height = 2.5)
+```
+
+#update dotplot
+
+```{r, fig.width=5, fig.height=5}
+sr <- readRDS("make_srt_object/sr_data.rds")
+colset <- c("#A9A9A9", 
+            "#F055A3", "#A56AAC", "#D99ACE", "#DCBFDD", "#77B3DA", "#4CBBD5", "#A5D0F0", "#528DD9", "#7876B1B2","#4DBBD5B2","#00A1D5B2",
+            "#9BCA3C", "#91D1C2", "#5FB14E", "#CADB73", "#3B897C")
+  
+DimPlot(object = sr, reduction = "mnn_umap", order = F, group.by = "refined.cluster", 
+        cols = colset, raster = T, pt.size = 0.3,
+        label = T, label.box = T, label.color = "white", label.size = 3)
+```
+
+```{r}
+CLL_B_name <- colnames(sr)[sr$refined.cluster %in% 1:11]
+T_name <- colnames(sr)[sr$refined.cluster %in% 12:16]
+
+i = "CLL153"
+j = 197402109
+alt = "C"
+
+sample.ls <- c("CLL156","CLL5309","CLL5602","CLL5305","CLL5306","CLL108",
+           "CLL141v","CLL141i","CLL153","CLL63i","CLL63v","CLL232","CLL152","CLL318","CLL155","CLL170i", "CLL170v", "CLL175",
+           "HD11","HD12","HD14")
+
+df <- df[order(df$alt_umi, decreasing = T), ]
+df <- df[1:8, ]
+positions <- as.numeric(sapply(strsplit(df$position, "_"), function(x){x[2]}))
+positions <- sort(positions)
+
+ref_table <- data.frame(pos = positions, 
+                        alt = c("G", "A", "C", "G", "C", "T", "C", "T"))
+
+t_info <- data.frame()
+CLL_info <- data.frame()
+
+for(i in sample.ls){
+print(paste("now working on", i, "==================="))
+  bamPath <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_bam/" , i, "_align2genome.bam")
+  for (j in positions) {
+    mygene <- GRanges(seqnames = "chr2", 
+                    ranges = IRanges(j + 1, j + 1),
+                    strand = "-")
+    x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+    #split x into cll and T
+    x.names <- sapply(strsplit(names(x), "_"), function(x){x[1]})
+    x.names <- paste0(i, "_", x.names, "-1")
+    x.t <- x[x.names %in% T_name]
+    x.b <- x[x.names %in% CLL_B_name]
+    
+    x.t <- table(x.t) %>% as.data.frame()
+    colnames(x.t) <- c("N", "counts")
+    x.t <- x.t[x.t$N %in% c("A", "T", "C", "G"), ]
+    if (sum(x.t$N == ref_table$alt[ref_table$pos == j]) > 0){
+    x.t$freq <- x.t$counts / sum(x.t$counts)
+    x.t$sample <- i
+    x.t$celltype <- "T.cell"
+    x.t$pos <- j + 1
+    x.t <- x.t[x.t$N == ref_table$alt[ref_table$pos == j], ]
+    t_info <- rbind(t_info, x.t)
+    } else {
+      print(paste("No counts in", i, "chr2", j, ref_table$alt[ref_table$pos == j], "============"))
+      x.t <- data.frame(N = ref_table$alt[ref_table$pos == j], 
+                        counts = 0, 
+                        freq = 0, 
+                        sample = i, 
+                        celltype = "T.cell",
+                        pos = j + 1)
+      t_info <- rbind(t_info, x.t)
+    }
+  
+    x.b <- table(x.b) %>% as.data.frame()
+    colnames(x.b) <- c("N", "counts")
+    x.b <- x.b[x.b$N %in% c("A", "T", "C", "G"), ]
+    x.b$freq <- x.b$counts / sum(x.b$counts)
+    x.b$sample <- i
+    x.b$celltype <- "CLL.cell"
+    x.b$pos <- j + 1
+    x.b <- x.b[x.b$N == ref_table$alt[ref_table$pos == j], ]
+    CLL_info <- rbind(CLL_info, x.b)
+  }
+}
+```
+
+```{r, fig.width=12, fig.height=3}
+t_info$freq <- (-1) * t_info$freq
+x <- rbind(t_info, CLL_info)
+ggplot(x, aes(x = paste0("Chr2:",pos), y = freq, color = paste0("Chr2:",pos))) + 
+  geom_jitter(position = position_jitter(0.3), size = 3) + 
+  scale_color_manual(values = ggsci::pal_npg(alpha = 0.6)(8)) + 
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey30") + 
+  theme_classic() +
+  xlab(NULL) + 
+  ylab("Frequency") 
+ggsave("find_all_mutation_fig/updated_alt_freq.pdf", width = 12, height = 3)
+```
+
+
+#mutation capture effeciency
+```{r, fig.width=6, fig.height=5}
+mut_cell <- c()
+mut_umis <- c()
+for(i in c("CLL153", "CLL155", "CLL156", "CLL5306")) {
+  mut_pathway <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_bam/", i, "_mutation/alt_cnt.csv.gz") 
+  x <- read.csv(mut_pathway)
+  
+  rownames(x) <- paste(x$chr, x$position, sep = "_")
+  x$chr <- NULL
+  x$position <- NULL
+  colnames(x) <- paste0(i, "_", colnames(x), "-1")
+  #keep_cell <- colnames(x)[colnames(x) %in% colnames(sr)]
+  #x <- x[, keep_cell]
+  
+  x <- as.data.frame(t(x))
+  df <- data.frame(bc = rownames(x), 
+                   mut = x$chr2_197402109)
+  
+  cell_with_mut <- df$bc[df$mut > 0]
+  mut_cell <- c(mut_cell, cell_with_mut)
+  
+  umis_with_mut <- sum(df$mut)
+  mut_umis <- c(mut_umis, umis_with_mut)
+}
+length(mut_cell) #3281
+sum(mut_umis) #43246
+
+#FLT-seq
+mut_cell <- c()
+mut_umis <- c()
+for(i in c("CLL153", "CLL155", "CLL156", "CLL5306")) {
+  mut_pathway <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/filtered_polyA/flames_out/old_mut/FLTseq_mutation/", i, "_alt_cnt.csv.gz") 
+  x <- read.csv(mut_pathway)
+  rownames(x) <- paste(x$chr, x$position, sep = "_")
+  x$chr <- NULL
+  x$position <- NULL
+  colnames(x) <- paste0(i, "_", colnames(x), "-1")
+  #keep_cell <- colnames(x)[colnames(x) %in% colnames(sr)]
+  #x <- x[, keep_cell]
+  
+  x <- as.data.frame(t(x))
+  
+  df <- data.frame(bc = rownames(x), 
+                   mut = x$chr2_197402109)
+  
+  cell_with_mut <- df$bc[df$mut > 0]
+  mut_cell <- c(mut_cell, cell_with_mut)
+  
+  umis_with_mut <- sum(df$mut)
+  mut_umis <- c(mut_umis, umis_with_mut)
+}
+length(mut_cell) # FLTseq: 382 cells
+sum(mut_umis) # 542
+```
+
+
+#find the mutation in sr data
+```{r}
+library(GenomicAlignments)
+library(Rsamtools)
+
+#lib20
+mut_cell <- c()
+mut_umis <- c()
+for(i in c("CLL153", "CLL155", "CLL156", "CLL5306")){
+  bamPath <- paste0("/vast/scratch/users/peng.h/compare_sr_bam/lib20/", i, "_lib20_cr.bam")
+  mygene <- GRanges(seqnames = "2", 
+                    ranges = IRanges(197402110, 197402110),
+                    strand = "-")
+
+
+  #match the reads with CB and UMIs
+  map.info <- c("rname", "strand", "pos", "qname")
+  map.params <- ScanBamParam(what = map.info, tag = c("CB", "UB"), which = mygene)
+  bam <- scanBam(bamPath, param = map.params)
+
+  df <- data.frame(qname = bam$`2:197402110-197402110`$qname, 
+                  cb = bam$`2:197402110-197402110`$tag$CB, 
+                  umi = bam$`2:197402110-197402110`$tag$UB,
+                  strand = bam$`2:197402110-197402110`$strand)
+  ##rm the reads without cb
+  df <- df[!is.na(df$cb), ]
+
+
+  #read in the pile-up reads
+  x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+  x <- x[df$qname]
+  #find the reads with mutations
+  mut.x <- x[x=="C"]
+  mut.x <- names(mut.x)
+  mut.x <- df[df$qname %in% mut.x, ]
+  mut.x <- mut.x$cb
+  mut.x <- mut.x[!duplicated(mut.x)]
+
+  mut_cell <- c(mut_cell, length(mut.x))
+
+  mut.x <- x[x=="C"]
+  mut.x <- names(mut.x)
+  mut.x <- df[df$qname %in% mut.x, ]
+  ##merge by UMIs
+  mut.x <- mut.x$cb
+  mut.x <- mut.x[!duplicated(mut.x)]
+  mut_umis <- c(mut_umis, length(mut.x))
+}
+sum(mut_cell)
+sum(mut_umis)
+
+#lib80
+mut_cell <- c()
+mut_umis <- c()
+for(i in c("CLL153", "CLL155", "CLL156", "CLL5306")){
+  bamPath <- paste0("/vast/scratch/users/peng.h/compare_sr_bam/lib80/", i, "_lib80_cr.bam")
+  mygene <- GRanges(seqnames = "2", 
+                    ranges = IRanges(197402110, 197402110),
+                    strand = "-")
+
+
+  #match the reads with CB and UMIs
+  map.info <- c("rname", "strand", "pos", "qname")
+  map.params <- ScanBamParam(what = map.info, tag = c("CB", "UB"), which = mygene)
+  bam <- scanBam(bamPath, param = map.params)
+
+  df <- data.frame(qname = bam$`2:197402110-197402110`$qname, 
+                  cb = bam$`2:197402110-197402110`$tag$CB, 
+                  umi = bam$`2:197402110-197402110`$tag$UB,
+                  strand = bam$`2:197402110-197402110`$strand)
+  ##rm the reads without cb
+  df <- df[!is.na(df$cb), ]
+
+
+  #read in the pile-up reads
+  x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+  x <- x[df$qname]
+  #find the reads with mutations
+  mut.x <- x[x=="C"]
+  mut.x <- names(mut.x)
+  mut.x <- df[df$qname %in% mut.x, ]
+  mut.x <- mut.x$cb
+  mut.x <- mut.x[!duplicated(mut.x)]
+
+  mut_cell <- c(mut_cell, length(mut.x))
+
+  mut.x <- x[x=="C"]
+  mut.x <- names(mut.x)
+  mut.x <- df[df$qname %in% mut.x, ]
+  ##merge by UMIs
+  mut.x <- mut.x$cb
+  mut.x <- mut.x[!duplicated(mut.x)]
+  mut_umis <- c(mut_umis, length(mut.x))
+}
+sum(mut_cell)
+sum(mut_umis)
+```
+
+
+```{r, fig.width=10, fig.height=5}
+library(ggplot2)
+#nCells
+df <- data.frame(Method = c("scRNA-seq", "scFLT-seq", "scRaCH-seq"), 
+                 Cells_with_mutation = c(281, 382, 3281))
+df$Method <- factor(df$Method, levels = c("scRNA-seq", "scFLT-seq", "scRaCH-seq"))
+p1 <- ggplot(df, aes(x = Method, y = Cells_with_mutation)) + 
+  geom_col(width = 0.6) + 
+  theme_bw() + 
+  theme(axis.text = element_text(size = 12)) + 
+  xlab(NULL) + 
+  ylab("Cell counts") +
+  ggtitle("Cells with SF3B1 K700E mutant transcript")
+
+#nUMIs
+df <- data.frame(Method = c("scRNA-seq", "scFLT-seq", "scRaCH-seq"), 
+                 Cells_with_mutation = c(281, 542, 43246))
+df$Method <- factor(df$Method, levels = c("scRNA-seq", "scFLT-seq", "scRaCH-seq"))
+p2 <- ggplot(df, aes(x = Method, y = Cells_with_mutation)) + 
+  geom_col(width = 0.6) + 
+  theme_bw() + 
+  theme(axis.text = element_text(size = 12)) + 
+  xlab(NULL) + 
+  ylab("UMI counts") +
+  ggtitle("transcripts with SF3B1 K700E mutation")
+
+p <- p1 + p2
+p
+ggsave("find_all_mutation_fig/compare_3_methods.pdf", width = 10, height = 5)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#end

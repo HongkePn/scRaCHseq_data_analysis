@@ -1,0 +1,296 @@
+---
+title: "Read loss"
+author: "Hongke Peng"
+date: "2023-12-14"
+output: html_document
+---
+
+```{r}
+library(Biostrings)
+library(scatterpie)
+library(ggplot2)
+```
+
+#make overall plots
+##read in fq after demultiplexing
+```{r}
+fq <- list.files("/vast/scratch/users/peng.h/rachseq/demultiplex/")
+fq <- fq[grep("fq.gz", fq)]
+seq.ls <- list()
+
+for (i in fq) {
+  print(i)
+  x <- Biostrings::readDNAStringSet(paste0("/vast/scratch/users/peng.h/rachseq/demultiplex/", i), format = "fastq")
+  seq.ls[[i]] <- x
+}
+
+all <- seq.ls[["CLL108.fq.gz"]]
+for (i in fq[2:length(fq)]) {
+  print(i)
+  all <- c(all, seq.ls[[i]])
+}
+rm(seq.ls)
+```
+
+##filtering reads by TSO and polyA
+```{r, fig.width=8, fig.height=4}
+x <- all
+rm(all)
+info <- data.frame(length = width(x), 
+                   ID = names(x))
+#info$BCUMI <- sapply(strsplit(info$ID, "#"), function(x) {x[1]})
+#info$barcode <- sapply(strsplit(info$BCUMI, "_"), function(x) {x[1]})
+#info$umi <- sapply(strsplit(info$BCUMI, "_"), function(x) {x[2]})
+
+#subset the beginning of each read
+#rm reads that are less than 15
+keep_df <- info$ID[info$length > 15]
+
+#find TSO in reads
+x.sub <- x[keep_df]
+x.start <- subseq(x.sub, start = 1, end = 15)
+y_length_df <- data.frame(length = width(x.sub),
+                          category = "unfiltered")
+##set mis-match as 3
+x.start <- x.start[vcountPattern("CTTATATGGG", x.start, max.mismatch = 3) > 0]
+x.sub <- x.sub[names(x.start)] ## subset read with TSO
+tmp <- data.frame(length = width(x.sub),
+                  category = "with_TSO")
+y_length_df <- rbind(tmp, y_length_df)
+y_length_df$category <- factor(y_length_df$category, levels = c("unfiltered", "with_TSO"))
+ggplot(y_length_df, aes(x = length, fill = category)) + geom_histogram(bins = 70, alpha = 0.7, position="identity") + 
+       scale_x_continuous(limits = c(0, 5000), breaks = seq(0, 5000, 500)) +
+       ggtitle("Read Length Distribution") +
+       xlab("length (bp)") + 
+       ylab("nCount") + 
+       theme_bw() + 
+  theme(axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 15))
+
+#find polyA tails
+#y_length_df <- data.frame(length = width(x.sub),
+#                          category = "with_TSO")
+
+x.polyA <- x.sub[vcountPattern("AAAAAAAAAAGTACTCTGCGTTGATACCACTGCTT", x.sub, max.mismatch = 3) > 0]
+tmp <- data.frame(length = width(x.polyA),
+                  category = "with_polyA")
+y_length_df <- rbind(tmp, y_length_df)
+y_length_df$category <- factor(y_length_df$category, levels = c("unfiltered", "with_TSO", "with_polyA"))
+ggplot(y_length_df, aes(x = length, fill = category)) + geom_histogram(bins = 70, alpha = 0.7, position="identity") + 
+       scale_x_continuous(limits = c(0, 5000), breaks = seq(0, 5000, 500)) +
+       ggtitle("Read Length Distribution") +
+       xlab("length (bp)") + 
+       ylab("Read counts") + 
+  scale_fill_manual(values = c("grey80", "grey70", "grey50")) + 
+  #scale_fill_manual(values = c("#2f83e4", "#00e5c1", "#23cbff")) + 
+       theme_bw() + 
+  theme(axis.text = element_text(size = 12))
+#ggsave("QC_step1_fig/read_length_distribution.pdf", width = 8, height = 3)
+```
+##read in raw data
+```{r, fig.width=6, fig.height=5}
+fq <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/fastq/")
+fq <- fq[!grepl("csv", fq)]
+
+seq.ls <- list()
+for (i in fq) {
+  print(i)
+  x <- Biostrings::readDNAStringSet(paste0("/vast/scratch/users/peng.h/rachseq/guppy_sup_output/fastq/", i, "/", i, ".fastq.gz"), format = "fastq")
+  seq.ls[[i]] <- x
+}
+
+all <- seq.ls[["CLL108"]]
+for (i in fq[2:length(fq)]) {
+  print(i)
+  all <- c(all, seq.ls[[i]])
+}
+
+tmp <- data.frame(length = width(all),
+                  category = "raw")
+rm(all)
+rm(seq.ls)
+y_length_df <- rbind(tmp, y_length_df)
+y_length_df$category <- factor(y_length_df$category, levels = c("raw", "unfiltered", "with_TSO", "with_polyA"))
+
+y_length_df$length[y_length_df$category == "raw"] <- y_length_df$length[y_length_df$category == "raw"] - 100
+
+ggplot(y_length_df, aes(x = length, fill = category)) + geom_histogram(binwidth = 100, alpha = 0.7, position="identity") + 
+       scale_x_continuous(limits = c(0, 5000), breaks = seq(0, 5000, 500)) +
+       ggtitle("Read Length Distribution") +
+       xlab("length (bp)") + 
+       ylab("Read counts") + 
+  scale_fill_manual(values = c("grey80", "grey60", "grey40", "grey10")) + 
+  #scale_fill_manual(values = c("#2f83e4", "#00e5c1", "#23cbff")) + 
+       theme_bw() + 
+  theme(axis.text = element_text(size = 10))
+ggsave("read_loss_fig/read_length_distribution_v1.pdf", width = 6, height = 5)
+saveRDS(y_length_df, "read_loss_fig/read_length_distribution_v1.rds")
+```
+
+##refining this plot
+```{r}
+y_length_df <- readRDS("QC_step1_fig/read_length_distribution_v1.rds")
+
+#unfiltered -> demultiplexed
+y_length_df$category <- as.character(y_length_df$category)
+y_length_df$category[y_length_df$category == "unfiltered"] <- "demultiplexed"
+y_length_df$category <- factor(y_length_df$category, levels = c("raw", "demultiplexed", "with_TSO", "with_polyA"))
+
+#average gene length : BTK: 2027, SF3B1: 2225
+ggplot(y_length_df, aes(x = length, fill = category)) + 
+  geom_histogram(binwidth = 100, alpha = 0.7, position="identity") + 
+  scale_x_continuous(limits = c(0, 5000), breaks = seq(0, 5000, 500)) +
+  scale_y_continuous(limits = c(0, 6e+06)) +
+  geom_vline(xintercept = 2027, color = "red") + 
+  geom_vline(xintercept = 2225, color = "red") +
+  ggtitle("Read Length Distribution") +
+  xlab("Read length (bp)") + 
+  ylab("Read counts") + 
+  scale_fill_manual(values = c("grey80", "grey60", "grey40", "grey10")) +
+       theme_bw() + 
+  theme(axis.text = element_text(size = 10))
+ggsave("read_loss_fig/read_length_distribution_v2.pdf", width = 6, height = 5)
+```
+
+
+#read counts loss during demultiplexing
+```{r, fig.width=8, fig.height=2}
+demultiplex_df <- read.csv("/vast/scratch/users/peng.h/rachseq/demultiplex/demulitplexing.csv")
+demultiplex_df$match <- demultiplex_df$hm_match + demultiplex_df$fuzzy_match
+demultiplex_df$not_match <- demultiplex_df$total_read - demultiplex_df$match
+
+#make bar plot
+library(tidyr)
+plot_dem_df <- gather(demultiplex_df, matched_loss, counts, match:not_match)
+plot_dem_df$matched_loss[plot_dem_df$matched_loss == "not_match"] <- "loss_after_demultiplex"
+plot_dem_df$matched_loss[plot_dem_df$matched_loss == "match"] <- "demultiplexed"
+
+plot_dem_df$matched_loss <- factor(plot_dem_df$matched_loss, levels = c("loss_after_demultiplex", "demultiplexed"))
+p1 <- ggplot(plot_dem_df, aes(x = patient, y = counts, fill = matched_loss)) + 
+  geom_col(width = 0.7) +
+  theme_bw() + 
+  xlab(NULL) + 
+  ylab("Read counts") +  
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9)) +
+  #scale_fill_manual(values = c("orange", "grey60")) +
+  scale_fill_manual(values = c("grey80", "grey40"))
+p1
+```
+
+
+#barcode in sr and lr
+```{r}
+sce <- readRDS("/vast/scratch/users/peng.h/rachseq/fastq_polyA/flames_out/sces.rds")
+#Add prefix "CLLxxx_" to the cell barcodes
+for (i in names(sce)) {
+  x <- sce[[i]]
+  colnames(x) <- paste(i, colnames(x), sep = "_")
+  sce[[i]] <- x
+}
+
+bc_df <- data.frame()
+tsv.tbl <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/barcode/")
+for (i in tsv.tbl) {
+  name <- strsplit(i, "\\.")[[1]][1]
+  #barcode detected in short-read seq 
+  cr_bc <- read.delim(paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/barcode/", i, sep = ""), header = F)
+  cr_bc <- sapply(strsplit(cr_bc$V1, "-"), function(x){x[1]})
+  cr_bc <- paste(name, cr_bc, sep = "_")
+
+  lr_bc = colnames(sce[[name]])
+  tmp_df <- data.frame(patient = name, 
+                      cr_bc = length(cr_bc),
+                      lr_bc = length(lr_bc),
+                      lr_in_cr = sum(lr_bc %in% cr_bc)
+                      #detection = sum(lr_bc %in% cr_bc)/length(cr_bc)
+                      )
+  bc_df <- rbind(bc_df, tmp_df)
+}
+```
+
+```{r, fig.width=8, fig.height=2}
+#make bar plot
+bc_df$lr_in_cr <- NULL
+colnames(bc_df) <- c("patient", "loss_in_lr", "found_in_lr")
+plot_bc_df <- gather(bc_df, barcode, counts, loss_in_lr:found_in_lr)
+
+plot_bc_df$barcode <- factor(plot_bc_df$barcode, levels = c("loss_in_lr", "found_in_lr"))
+  
+p2 <- ggplot(plot_bc_df, aes(x = patient, y = counts, fill = barcode)) + 
+  geom_col(position = "identity", width = 0.7) + 
+  theme_bw() + 
+  xlab(NULL) + 
+  ylab("Cell counts") +  
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9)) +
+  scale_fill_manual(values = c("grey80", "grey40"))
+p2
+```
+
+#reads mapping to target gene
+
+```{r}
+fq <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/filtered_polyA/flames_out/")
+fq <- fq[grep("realign2transcript.bam$", fq)]
+
+fsm <- read.csv("/vast/scratch/users/peng.h/rachseq/fastq_polyA/flames_out/isoform_FSM_annotation.csv")
+fsm$category <- "background"
+fsm$category[fsm$gene_id %in% c("ENSG00000115524.16", "ENSG00000010671.15")] <- "target"
+target_gene <- fsm$transcript_id[fsm$category == "target"]
+
+
+#read in BAM files
+library(Rsamtools)
+
+mapping_read_df <- data.frame()
+for (i in fq) {
+  bam <- BamFile(paste0("/vast/scratch/users/peng.h/rachseq/fastq_polyA/flames_out/", i))
+  bam <- scanBam(bam)
+  mapping_region <- data.frame(read_name = bam[[1]]$qname, 
+                               mapping = bam[[1]]$rname)
+  mapping_region <- mapping_region[!duplicated(mapping_region$read_name), ]
+  
+  mapping_region$category <- "background"
+  mapping_region$category[mapping_region$mapping %in% target_gene] <- "target"
+  
+  tmp <- table(mapping_region$category) %>% as.data.frame()
+  colnames(tmp) <- c("mapping", "count")
+  tmp$patient <- strsplit(i, "_")[[1]][1]
+  mapping_read_df <- rbind(mapping_read_df, tmp)
+}
+
+p3 <- ggplot(mapping_read_df, aes(x = patient, y = count, fill = mapping)) + 
+      #geom_col(position = "identity", width = 0.7) + 
+      geom_col(width = 0.7) + 
+      theme_bw() + 
+      xlab(NULL) + 
+      ylab("Read counts") +  
+      theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9)) +
+      scale_fill_manual(values = c("grey80", "grey40"))
+p3
+```
+
+
+
+
+```{r, fig.width=8, fig.height=7}
+p <- p1 / p2 / p3
+p
+ggsave(plot = p, filename = "read_loss_fig/barplot_3in1_by_pt.pdf", width = 8, height = 7)
+```
+
+
+
+```{r}
+x <- readRDS("read_loss_fig/read_length_distribution_v1.rds")
+```
+
+
+
+
+
+
+
+
+
+
+

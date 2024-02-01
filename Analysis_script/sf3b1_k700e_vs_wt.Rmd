@@ -1,0 +1,779 @@
+---
+title: "SF3B1 K700E vs WT"
+author: "Hongke Peng"
+date: "2023-09-16"
+output: html_document
+---
+
+#load library
+```{r}
+library(SingleCellExperiment)
+library(clusterProfiler)
+library(dittoSeq)
+library(DropletUtils)
+library(dplyr)
+library(ggplot2)
+library(Seurat)
+library(ggpointdensity)
+library(harmony)
+library(transPlotR)
+library(biomaRt)
+library(Seurat)
+library(SingleCellExperiment)
+library(edgeR)
+```
+
+
+```{r}
+sr <- readRDS("make_srt_object/sr_data.rds")
+
+fq <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/demultiplex/")
+fq <- fq[grep("fq.gz", fq)]
+sample.ls <- sapply(strsplit(fq, "\\."), function(x){x[1]})
+
+mut_ls <- list()
+ref_ls <- list()
+#c("CLL156","CLL5309","CLL5602","CLL5305","CLL5306","CLL141v","CLL141i","CLL153","CLL63i","CLL63v","CLL232","CLL318","CLL155","CLL170i", "CLL170v", "CLL175","HD11","HD12","HD14")
+for(i in sample.ls) {
+  mut_pathway <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_bam/", i, "_mutation/alt_cnt.csv.gz") 
+  x <- read.csv(mut_pathway)
+  rownames(x) <- paste(x$chr, x$position, sep = "_")
+  x$chr <- NULL
+  x$position <- NULL
+  colnames(x) <- paste0(i, "_", colnames(x), "-1")
+  keep_cell <- colnames(x)[colnames(x) %in% colnames(sr)]
+  x <- x[, keep_cell]
+  mut_ls[[i]] <- x
+  
+  ref_pathway <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_bam/", i, "_mutation/ref_cnt.csv.gz") 
+  x <- read.csv(ref_pathway)
+  rownames(x) <- paste(x$chr, x$position, sep = "_")
+  x$chr <- NULL
+  x$position <- NULL
+  colnames(x) <- paste0(i, "_", colnames(x), "-1")
+  keep_cell <- colnames(x)[colnames(x) %in% colnames(sr)]
+  x <- x[, keep_cell]
+  ref_ls[[i]] <- x
+}
+
+mut_mtx <- data.frame()
+for(i in sample.ls) {
+  x <- mut_ls[[i]]
+  x <- as.data.frame(t(x))
+  y <- ref_ls[[i]]
+  y <- as.data.frame(t(y))
+  
+  tmp <- data.frame(bc = rownames(x), 
+                   mut = x$chr2_197402109,
+                   ref = y$chr2_197402109)
+  mut_mtx <- rbind(mut_mtx, tmp)
+}
+rownames(mut_mtx) <- mut_mtx$bc
+mut_mtx <- mut_mtx[rownames(mut_mtx) %in% colnames(sr), ]
+mut_mtx$patient <- sapply(strsplit(rownames(mut_mtx), "_"), function(x){x[1]})
+rm(sr)
+rm(ref_ls)
+rm(mut_ls)
+```
+
+#check controls
+* Cell with SF3B1 mutations: should only exist in CLL cells. 
+* Only 4 samples have this point mutation
+```{r}
+mut_mtx$K700E <- mut_mtx$mut > 0
+mut_mtx$WT <- mut_mtx$ref > 0
+table(mut_mtx$mut, mut_mtx$patient)
+table(mut_mtx$ref, mut_mtx$patient)
+table(mut_mtx$K700E, mut_mtx$WT)
+
+# I will use all cell with ref > 10 and mut = 0
+ref_mtx <- mut_mtx[mut_mtx$mut == 0 & mut_mtx$ref > 10, ] # 5961 cells
+table(ref_mtx$patient)
+ref_group <- ref_mtx$bc
+
+# I will use all cell with mut > 1
+selected_mut_mtx <- mut_mtx[mut_mtx$mut > 2, ] # 1520 cells
+dim(selected_mut_mtx)
+table(selected_mut_mtx$patient)
+mut_group <- selected_mut_mtx$bc
+
+#rm(mut_mtx)
+#rm(ref_mtx)
+#rm(selected_mut_mtx)
+```
+
+```{r}
+#selected all CLL clusters
+sr <- readRDS("make_srt_object/sr_data.rds")
+b <- subset(sr, refined.cluster %in% 1:10)
+b$compare <- "background"
+b$compare[colnames(b) %in% ref_group] <- "ref"
+b$compare[colnames(b) %in% mut_group] <- "mut"
+table(b$compare)
+DefaultAssay(b) <- "RNA"
+
+colset <- c("#A9A9A9", 
+            "#F055A3", "#A56AAC", "#D99ACE", "#DCBFDD", "#77B3DA", "#4CBBD5", "#A5D0F0", "#528DD9", "#7876B1B2","#4DBBD5B2","#00A1D5B2",
+            "#9BCA3C", "#91D1C2", "#5FB14E", "#CADB73", "#3B897C")
+  
+DimPlot(object = b, reduction = "mnn_umap", order = F, group.by = "refined.cluster", 
+        cols = colset, raster = T, pt.size = 0.3,
+        label = T, label.box = T, label.color = "white", label.size = 3)
+```
+
+
+#single cell method
+##use the mutant cell found by RaCH-seq
+```{r, fig.width=7, fig.height=8}
+#single cell MAST DE
+#marker <- readRDS("call_sf3b1_fig/marker.rds")
+marker <- FindMarkers(b, group.by = "compare", ident.1 = "mut", ident.2 = "ref", test.use = "MAST", logfc.threshold = 0, min.diff.pct = 0.1)
+marker$gene <- rownames(marker)
+selected_marker <- marker[!grepl("^IG", marker$gene), ]
+#DEsingle
+# library(DEsingle)
+# b.select <- subset(b, compare != "background")
+# count_mtx <- GetAssayData(b.select, assay = "RNA", slot = "count")
+# count_mtx <- count_mtx[rowSums(count_mtx > 0) > 1000, ]
+# comapare_factor <- factor(b.select$compare, levels = c("mut", "ref"))
+# names(comapare_factor) <- NULL
+# library(BiocParallel)
+# param <- MulticoreParam(workers = 10, progressbar = TRUE)
+# results <- DEsingle(counts = count_mtx, group = comapare_factor)
+
+EnhancedVolcano::EnhancedVolcano(selected_marker,
+                x="avg_log2FC",y="p_val_adj",
+                lab=selected_marker$gene,
+                subtitle = paste0('FDR cutoff = 0.05', "  logFC cutoff = 0.5"),
+                labSize = 5,
+                xlim = c(-4, 4), 
+                legendPosition = "top",
+                legendLabSize = 12,
+                legendIconSize = 4.0,
+                drawConnectors = T,
+                pCutoff = 0.05,
+                FCcutoff = 0.5)
+ggsave("SF3B1_K700E_VS_WT_FIG/MAST_volcano.pdf", width = 7, height = 8)
+write.csv(selected_marker, "SF3B1_K700E_VS_WT_FIG/MAST_markers_IG_removed.csv")
+saveRDS(b, "SF3B1_K700E_VS_WT_FIG/cll_b.rds")
+```
+
+#BULK: all mt vs wt
+```{r,fig.width=16,fig.height=5}
+pt=subset(b, stage != "HD")
+#rm(b)
+
+#keep
+keep_cell <- (pt$orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306") & pt$compare == "mut") | (!(pt$orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306")) & pt$compare == "ref")
+pt <- pt[, keep_cell]
+
+pt=pt[, !(pt$orig.ident %in% c("CLL63i", "CLL63v", "CLL5305"))] # cell count < 50
+#pt=pt[, !(pt$orig.ident %in% c("CLL63i"))]
+pt=pt[, !(pt$orig.ident %in% c("HD11", "HD12", "HD14"))] # rm health donor
+pt=pt[, !(pt$orig.ident %in% c("CLL318"))] # rm samples with KVR700**R mutation
+pt=pt[, !(pt$orig.ident %in% c("CLL141i", "CLL170i"))] # rm the samples treated with BTKi
+#pt=pt[, !(pt$orig.ident %in% c("CLL175", "CLL5309"))]
+pt$orig.ident <- factor(pt$orig.ident, levels = unique(pt$orig.ident))
+
+#make sce
+matr=pt@assays$RNA@counts
+#md=pt@meta.data[,c("compare","orig.ident")]
+md=pt@meta.data[,c("stage","orig.ident")]
+sce=SingleCellExperiment(assay=list(counts=matr),colData=md)
+
+pool=scater::aggregateAcrossCells(sce,id=colData(sce)[,c("stage","orig.ident")])
+
+y=pool
+y=DGEList(counts=counts(y),samples=colData(y),remove.zeros=T)
+y$samples$stage <- "R"
+y$samples$stage[y$samples$orig.ident %in% c("CLL156", "CLL5306", "CLL5309", "CLL5602", "CLL5305", "CLL108")] <- "S"
+y$samples$stage[y$samples$orig.ident %in% c("CLL141i", "CLL170i")] <- "RB"
+
+y$samples$sf3b1 <- "WT"
+y$samples$sf3b1[y$samples$orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306")] <- "MUT"
+
+#filtering 
+keep=filterByExpr(y,group=y$samples$sf3b1)
+summary(keep)#rm:10098,retain:8726
+y=y[keep,,keep.lib.sizes=FALSE]
+#calculate normalization factors
+y=calcNormFactors(y)
+#plot MDS
+mds=plotMDS.DGEList(y,plot=F)
+gg_df=data.frame(mds[c("x","y")],
+                 patient_id=y$samples$orig.ident,
+                 group_id=y$samples$sf3b1,
+                 stage = y$samples$stage)
+
+c1=adjustcolor("#0072B2",0.5)
+c2=adjustcolor("#B20072",0.5)
+
+#getPalette=colorRampPalette(brewer.pal(10,"Set1"))
+p1 <- ggplot(gg_df,aes(x,y,col=group_id,shape=stage))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p2 <- ggplot(gg_df,aes(x,y,col=stage))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    #scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p3 <- ggplot(gg_df,aes(x,y,col=patient_id))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    #scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p <- p1 + p2 + p3
+p
+ggsave(plot = p, filename = "sf3b1_k700e_fig/mds_sf3b1_mut_vs_wt.pdf", width = 16, height = 5)
+```
+
+```{r, fig.width=7, fig.height=8}
+#make design
+#f1=factor(y$samples$compare,levels=c("mut","ref"))
+f1=factor(y$samples$sf3b1,levels=c("MUT","WT"))
+f2=factor(y$samples$stage, levels = c("S", "R", "RB"))
+design=model.matrix(~0+f1+f2)
+colnames(design)=gsub("f\\d","",colnames(design))
+  
+#make contrast
+contr=makeContrasts(
+    mut_vs_ref=MUT-WT,
+    levels=colnames(design)
+  )
+
+y=estimateDisp(y,design)
+plotBCV(y)
+  
+fit=glmFit(y,design)
+lrt=glmLRT(fit,contrast=contr)
+#fit=glmQLFit(y,design)
+#lrt=glmQLFTest(fit,contrast=contr)
+DEG=topTags(lrt,n=Inf)
+  
+#the proportion of cell express this gene
+df=DEG$table
+df$gene <- rownames(df)
+write.csv(df, "sf3b1_k700e_fig/edgeR_sf3b1_mut_vs_wt.csv")
+#df <- read.csv("sf3b1_k700e_fig/edgeR_sf3b1_mut_vs_wt.csv")
+#no significant DEGs :)
+selected_df <- df[!grepl("^IG", df$gene), ]
+
+EnhancedVolcano::EnhancedVolcano(selected_df,
+                x="logFC",y="PValue",
+                lab=rownames(selected_df),
+                xlim=c(-10,10),
+                #ylim=c(0,20),
+                #title = paste("DE gene in",i),
+                subtitle = paste0('FDR cutoff = 0.05', "  logFC cutoff = 1"),
+                labSize = 5, 
+                raster = T,
+                legendPosition = "top",
+                legendLabSize = 12,
+                legendIconSize = 4.0,
+                boxedLabels = T,
+                drawConnectors = T,
+                pCutoff = 0.05,
+                FCcutoff = 1)
+ggsave("sf3b1_k700e_fig/volcano_mut_vs_wt_rmIG.pdf", width = 7, height = 8)
+
+EnhancedVolcano::EnhancedVolcano(df,
+                x="logFC",y="PValue",
+                lab=rownames(df),
+                #xlim=c(-10,10),
+                #ylim=c(0,20),
+                #title = paste("DE gene in",i),
+                subtitle = paste0('FDR cutoff = 0.05', "  logFC cutoff = 1"),
+                labSize = 5, 
+                raster = T,
+                legendPosition = "top",
+                legendLabSize = 12,
+                legendIconSize = 4.0,
+                boxedLabels = T,
+                drawConnectors = T,
+                pCutoff = 0.05,
+                FCcutoff = 1)
+ggsave("sf3b1_k700e_fig/volcano_mut_vs_wt.pdf", width = 7, height = 8)
+```
+
+#In WT cells
+```{r, fig.width=16, fig.height=5}
+pt=subset(b, stage != "HD")
+
+#keep
+keep_cell <- (pt$orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306") & pt$compare == "mut") | (!(pt$orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306")) & pt$compare == "ref")
+pt <- pt[, keep_cell]
+
+pt=pt[, !(pt$orig.ident %in% c("CLL63i", "CLL63v", "CLL5305"))] # cell count too low,11, 32 and 30
+pt=pt[, !(pt$orig.ident %in% c("HD11", "HD12", "HD14"))]
+pt=pt[, !(pt$orig.ident %in% c("CLL318"))]
+pt=pt[, !(pt$orig.ident %in% c("CLL141i", "CLL170i"))]
+#pt=pt[, !(pt$orig.ident %in% c("CLL175", "CLL5309"))]
+
+pt=pt[, pt$compare == "ref"]
+pt$orig.ident <- factor(pt$orig.ident, levels = unique(pt$orig.ident))
+
+#make sce
+matr=pt@assays$RNA@counts
+#md=pt@meta.data[,c("compare","orig.ident")]
+md=pt@meta.data[,c("stage","orig.ident")]
+sce=SingleCellExperiment(assay=list(counts=matr),colData=md)
+
+pool=scater::aggregateAcrossCells(sce,id=colData(sce)[,c("stage","orig.ident")])
+
+y=pool
+y=DGEList(counts=counts(y),samples=colData(y),remove.zeros=T)
+y$samples$stage <- "R"
+y$samples$stage[y$samples$orig.ident %in% c("CLL156", "CLL5306", "CLL5309", "CLL5602", "CLL5305", "CLL108")] <- "S"
+y$samples$stage[y$samples$orig.ident %in% c("CLL141i", "CLL170i")] <- "RB"
+
+y$samples$sf3b1 <- "WT"
+y$samples$sf3b1[y$samples$orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306")] <- "MUT"
+
+#filtering 
+keep=filterByExpr(y,group=y$samples$stage)
+summary(keep)#rm:9169,retain:8353
+y=y[keep,,keep.lib.sizes=FALSE]
+#calculate normalization factors
+y=calcNormFactors(y)
+#plot MDS
+mds=plotMDS.DGEList(y,plot=F)
+gg_df=data.frame(mds[c("x","y")],
+                 patient_id=y$samples$orig.ident,
+                 group_id=y$samples$sf3b1,
+                 stage = y$samples$stage)
+
+c1=adjustcolor("#0072B2",0.7)
+c2=adjustcolor("#B20072",0.7)
+
+#getPalette=colorRampPalette(brewer.pal(10,"Set1"))
+p1 <- ggplot(gg_df,aes(x,y,col=group_id))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p2 <- ggplot(gg_df,aes(x,y,col=stage))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    #scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p3 <- ggplot(gg_df,aes(x,y,col=patient_id))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    #scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p <- p1 + p2 + p3
+p
+#ggsave(plot = p, filename = "SF3B1_K700E_VS_WT_FIG/mds_sf3b1_mut_vs_wt.pdf", width = 16, height = 5)
+```
+
+
+```{r, fig.width=7, fig.height=8}
+y$samples$patient <- "x"
+y$samples$patient[y$samples$orig.ident %in% c("CLL5309", "CLL175")] <- "CLL6"
+y$samples$patient[y$samples$orig.ident %in% c("CLL108", "CLL170v")] <- "CLL23"
+y$samples$patient[y$samples$orig.ident %in% c("CLL5602", "CLL232")] <- "CLL7"
+y$samples$patient[y$samples$orig.ident == "CLL141v"] <- "CLL2"
+y$samples$patient[y$samples$orig.ident == "CLL152"] <- "CLL16"
+
+#make design
+f1=factor(y$samples$stage, levels = c("S", "R"))
+f2=factor(y$samples$patient)
+design=model.matrix(~0+f1+f2)
+colnames(design)=gsub("f\\d","",colnames(design))
+  
+#make contrast
+contr=makeContrasts(
+    screening_vs_relapsed=R-S,
+    levels=colnames(design)
+  )
+
+y=estimateDisp(y,design)
+plotBCV(y)
+  
+fit=glmFit(y,design)
+lrt=glmLRT(fit,contrast=contr)
+#fit=glmQLFit(y,design)
+#lrt=glmQLFTest(fit,contrast=contr)
+DEG=topTags(lrt,n=Inf)
+  
+#the proportion of cell express this gene
+df=DEG$table
+df$gene <- rownames(df)
+write.csv(df, "sf3b1_k700e_fig/edgeR_wt_R_vs_S.csv")
+#no significant DEGs :)
+#df=df[df$logCPM >= 5, ]
+
+EnhancedVolcano::EnhancedVolcano(df,
+                x="logFC",y="FDR",
+                lab=rownames(df),
+                #xlim=c(-10,10),
+                #ylim=c(0,20),
+                #title = paste("DE gene in",i),
+                subtitle = paste0('FDR cutoff = 0.05', "  logFC cutoff = 1"),
+                labSize = 5, 
+                raster = T,
+                legendPosition = "top", 
+                boxedLabels = T,
+                legendLabSize = 12,
+                legendIconSize = 4.0,
+                drawConnectors = T,
+                pCutoff = 0.05,
+                FCcutoff = 1)
+ggsave("sf3b1_k700e_fig/volcano_wt_R_vs_S.pdf", width = 7, height = 8)
+```
+
+```{r}
+all_gene_set <- data.frame()
+library(msigdbr)
+
+##Hallmark
+mtx <- msigdbr(species = "Homo sapiens",category = "H")
+mtx <- as.data.frame(mtx)
+all_gene_set <- rbind(all_gene_set, mtx)
+
+#df <- readRDS("call_sf3b1_fig/marker_screening_mut_vs_wt.rds")
+
+#length(unique(unlist(gs))) #18707
+
+gmt <- data.frame(term = all_gene_set$gs_name, 
+                  gene = all_gene_set$entrez_gene)
+
+#rm genes with small faction of cells expressing it
+id=bitr(df$gene,"SYMBOL","ENTREZID","org.Hs.eg.db") #5.38% of input gene IDs are fail to map...
+#make geneList
+marker=merge(df,id,by.x="gene",by.y="SYMBOL")
+marker=data.frame(logFC=marker$logFC,SYMBOL=marker$ENTREZID)
+#marker=data.frame(logFC=marker$avg_log2FC,SYMBOL=marker$ENTREZID)
+geneList=marker$logFC
+names(geneList)=marker$SYMBOL
+geneList=sort(geneList,decreasing=T)
+wt.gsea.result <- GSEA(geneList, TERM2GENE = gmt, seed = T, pvalueCutoff = 0.01, pAdjustMethod = "BH")
+write.csv(wt.gsea.result@result, "sf3b1_k700e_fig/wt_gsea_result.csv")
+```
+
+#In MUT cells
+```{r, fig.width=16, fig.height=5}
+pt=subset(b, stage != "HD")
+
+#keep
+keep_cell <- (pt$orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306") & pt$compare == "mut") | (!(pt$orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306")) & pt$compare == "ref")
+pt <- pt[, keep_cell]
+
+pt=pt[, !(pt$orig.ident %in% c("CLL63i", "CLL63v", "CLL5305"))] # cell count too low,11, 32 and 30
+pt=pt[, !(pt$orig.ident %in% c("HD11", "HD12", "HD14"))]
+pt=pt[, !(pt$orig.ident %in% c("CLL318"))]
+pt=pt[, !(pt$orig.ident %in% c("CLL141i", "CLL170i"))]
+#pt=pt[, !(pt$orig.ident %in% c("CLL175", "CLL5309"))]
+
+pt=pt[, pt$compare == "mut"]
+pt$orig.ident <- factor(pt$orig.ident, levels = unique(pt$orig.ident))
+
+#make sce
+matr=pt@assays$RNA@counts
+#md=pt@meta.data[,c("compare","orig.ident")]
+md=pt@meta.data[,c("stage","orig.ident")]
+sce=SingleCellExperiment(assay=list(counts=matr),colData=md)
+
+pool=scater::aggregateAcrossCells(sce,id=colData(sce)[,c("stage","orig.ident")])
+
+y=pool
+y=DGEList(counts=counts(y),samples=colData(y),remove.zeros=T)
+y$samples$stage <- "R"
+y$samples$stage[y$samples$orig.ident %in% c("CLL156", "CLL5306", "CLL5309", "CLL5602", "CLL5305", "CLL108")] <- "S"
+y$samples$stage[y$samples$orig.ident %in% c("CLL141i", "CLL170i")] <- "RB"
+
+y$samples$sf3b1 <- "WT"
+y$samples$sf3b1[y$samples$orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306")] <- "MUT"
+
+#filtering 
+keep=filterByExpr(y,group=y$samples$stage)
+summary(keep)#rm:9169,retain:8353
+y=y[keep,,keep.lib.sizes=FALSE]
+#calculate normalization factors
+y=calcNormFactors(y)
+#plot MDS
+mds=plotMDS.DGEList(y,plot=F)
+gg_df=data.frame(mds[c("x","y")],
+                 patient_id=y$samples$orig.ident,
+                 group_id=y$samples$sf3b1,
+                 stage = y$samples$stage)
+
+c1=adjustcolor("#0072B2",0.7)
+c2=adjustcolor("#B20072",0.7)
+
+#getPalette=colorRampPalette(brewer.pal(10,"Set1"))
+p1 <- ggplot(gg_df,aes(x,y,col=group_id))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p2 <- ggplot(gg_df,aes(x,y,col=stage))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    #scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p3 <- ggplot(gg_df,aes(x,y,col=patient_id))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    #scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p <- p1 + p2 + p3
+p
+#ggsave(plot = p, filename = "SF3B1_K700E_VS_WT_FIG/mds_sf3b1_mut_vs_wt.pdf", width = 16, height = 5)
+```
+
+```{r, fig.width=7, fig.height=8}
+y$samples$patient <- "x"
+y$samples$patient[y$samples$orig.ident %in% c("CLL5306", "CLL155")] <- "CLL26"
+y$samples$patient[y$samples$orig.ident %in% c("CLL156", "CLL153")] <- "CLL3"
+
+#make design
+f1=factor(y$samples$stage, levels = c("S", "R"))
+f2=factor(y$samples$patient)
+design=model.matrix(~0+f1+f2)
+colnames(design)=gsub("f\\d","",colnames(design))
+
+#make contrast
+contr=makeContrasts(
+    screening_vs_relapsed=R-S,
+    levels=colnames(design)
+  )
+
+y=estimateDisp(y,design)
+plotBCV(y)
+  
+fit=glmFit(y,design)
+lrt=glmLRT(fit,contrast=contr)
+#fit=glmQLFit(y,design)
+#lrt=glmQLFTest(fit,contrast=contr)
+DEG=topTags(lrt,n=Inf)
+  
+#the proportion of cell express this gene
+df=DEG$table
+df$gene <- rownames(df)
+write.csv(df, "sf3b1_del_fig/edgeR_mut_R_vs_S.csv")
+#no significant DEGs :)
+#df=df[df$logCPM >= 5, ]
+
+EnhancedVolcano::EnhancedVolcano(df,
+                x="logFC",y="FDR",
+                lab=rownames(df),
+                #xlim=c(-10,10),
+                #ylim=c(0,20),
+                #title = paste("DE gene in",i),
+                subtitle = paste0('FDR cutoff = 0.05', "  logFC cutoff = 1"),
+                labSize = 5, 
+                raster = T,
+                legendPosition = "top",
+                legendLabSize = 12,
+                legendIconSize = 4.0,
+                boxedLabels = T, 
+                drawConnectors = T,
+                pCutoff = 0.05,
+                FCcutoff = 1)
+ggsave("sf3b1_del_fig/volcano_mut_R_vs_S.pdf", width = 7, height = 8)
+```
+
+```{r}
+all_gene_set <- data.frame()
+library(msigdbr)
+
+##Hallmark
+mtx <- msigdbr(species = "Homo sapiens",category = "H")
+mtx <- as.data.frame(mtx)
+all_gene_set <- rbind(all_gene_set, mtx)
+
+#df <- readRDS("call_sf3b1_fig/marker_screening_mut_vs_wt.rds")
+
+#length(unique(unlist(gs))) #18707
+
+gmt <- data.frame(term = all_gene_set$gs_name, 
+                  gene = all_gene_set$entrez_gene)
+
+#rm genes with small faction of cells expressing it
+id=bitr(df$gene,"SYMBOL","ENTREZID","org.Hs.eg.db") #5.38% of input gene IDs are fail to map...
+#make geneList
+marker=merge(df,id,by.x="gene",by.y="SYMBOL")
+marker=data.frame(logFC=marker$logFC,SYMBOL=marker$ENTREZID)
+#marker=data.frame(logFC=marker$avg_log2FC,SYMBOL=marker$ENTREZID)
+geneList=marker$logFC
+names(geneList)=marker$SYMBOL
+geneList=sort(geneList,decreasing=T)
+mut.gsea.result <- GSEA(geneList, TERM2GENE = gmt, seed = T, pvalueCutoff = 0.01, pAdjustMethod = "BH")
+write.csv(mut.gsea.result@result, "sf3b1_k700e_fig/mut_gsea_result.csv")
+```
+
+#single cell de in WT/MUT cells
+```{r}
+# mut: relapsed vs screening
+b.select <- subset(b, compare == "mut")
+b.select <- subset(b.select, orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306"))
+table(b.select$orig.ident, b.select$stage)
+marker <- FindMarkers(b.select, group.by = "stage", ident.1 = "relapsed", ident.2 = "screening", test.use = "MAST", logfc.threshold = 0, min.diff.pct = 0)
+marker$gene <- rownames(marker)
+mut.marker <- marker
+write.csv(mut.marker, "sf3b1_k700e_fig/marker_mut_relapse_vs_screening.csv", col.names = T)
+
+# ref: relapsed vs screening
+b.select <- subset(b, compare == "ref")
+b.select <- subset(b.select, orig.ident %in% c("CLL108", "CLL152", "CLL5309","CLL5602","CLL5305","CLL141v","CLL63v","CLL232","CLL170v", "CLL175"))
+table(b.select$orig.ident, b.select$stage)
+marker <- FindMarkers(b.select, group.by = "stage", ident.1 = "relapsed", ident.2 = "screening", test.use = "MAST", logfc.threshold = 0, min.diff.pct = 0)
+marker$gene <- rownames(marker)
+wt.marker <- marker
+write.csv(wt.marker, "sf3b1_k700e_fig/marker_ref_relapse_vs_screening.csv", col.names = T)
+```
+
+```{r}
+all_gene_set <- data.frame()
+library(msigdbr)
+##C2 canonical pathway
+#for (i in c("CP:BIOCARTA", "CP:KEGG", "CP:REACTOME", "CP:WIKIPATHWAYS", "CP:PID")) {
+#  mtx <- msigdbr(species = "Homo sapiens",category = "C2",subcategory = i)
+#  mtx <- as.data.frame(mtx)
+#  all_gene_set <- rbind(all_gene_set, mtx)
+#}
+##Hallmark
+mtx <- msigdbr(species = "Homo sapiens",category = "H")
+mtx <- as.data.frame(mtx)
+all_gene_set <- rbind(all_gene_set, mtx)
+
+#df <- readRDS("call_sf3b1_fig/marker_screening_mut_vs_wt.rds")
+
+#length(unique(unlist(gs))) #18707
+
+gmt <- data.frame(term = all_gene_set$gs_name, 
+                  gene = all_gene_set$entrez_gene)
+
+df <- mut.marker
+#df <- df[df$pct.1 > 0.1 | df$pct.2 > 0.1,]
+#rm genes with small faction of cells expressing it
+id=bitr(df$gene,"SYMBOL","ENTREZID","org.Hs.eg.db") #5.38% of input gene IDs are fail to map...
+#make geneList
+marker=merge(df,id,by.x="gene",by.y="SYMBOL")
+marker=data.frame(logFC=marker$avg_log2FC,SYMBOL=marker$ENTREZID)
+#marker=data.frame(logFC=marker$avg_log2FC,SYMBOL=marker$ENTREZID)
+geneList=marker$logFC
+names(geneList)=marker$SYMBOL
+geneList=sort(geneList,decreasing=T)
+mut.gsea.result <- GSEA(geneList, TERM2GENE = gmt, seed = T, pvalueCutoff = 0.05, pAdjustMethod = "BH")
+
+df <- wt.marker
+#df <- df[df$pct.1 > 0.1 | df$pct.2 > 0.1,]
+#rm genes with small faction of cells expressing it
+id=bitr(df$gene,"SYMBOL","ENTREZID","org.Hs.eg.db") #5.38% of input gene IDs are fail to map...
+#make geneList
+marker=merge(df,id,by.x="gene",by.y="SYMBOL")
+marker=data.frame(logFC=marker$avg_log2FC,SYMBOL=marker$ENTREZID)
+#marker=data.frame(logFC=marker$avg_log2FC,SYMBOL=marker$ENTREZID)
+geneList=marker$logFC
+names(geneList)=marker$SYMBOL
+geneList=sort(geneList,decreasing=T)
+wt.gsea.result <- GSEA(geneList, TERM2GENE = gmt, seed = T, pvalueCutoff = 0.05, pAdjustMethod = "BH")
+```
+
+```{r}
+View(mut.gsea.result@result)
+View(wt.gsea.result@result)
+setdiff(mut.gsea.result@result$Description, wt.gsea.result@result$Description)
+setdiff(wt.gsea.result@result$Description, mut.gsea.result@result$Description)
+```
+
+```{r}
+write.csv(mut.gsea.result@result, "sf3b1_k700e_fig/gsea_mut.csv")
+write.csv(wt.gsea.result@result, "sf3b1_k700e_fig/gsea_wt.csv")
+```
+
+```{r, fig.width=8, fig.height=4}
+mut_df <- mut.gsea.result@result[1:10, ]
+mut_df$Description <- factor(mut_df$Description, levels = rev(mut_df$Description))
+ggplot(mut_df, aes(x = NES, y = Description)) + 
+  geom_col(fill = c2, width = 0.7) +
+  theme_minimal() +
+  scale_fill_manual(values = c2) +
+  xlim(c(0, 3)) + 
+  theme(axis.text.y=element_text(face="bold",size=10,hjust=0),
+        axis.line.x=element_line(size=0.3,color="black"),
+        axis.ticks.length.x=unit(-0.20,"cm"),
+        axis.text.x=element_text(margin=margin(t=0.3,unit="cm")),
+        panel.grid.major=element_blank()) +
+  ylab(NULL) +
+  xlab("Normalized enrichment score") + 
+  ggtitle("Top hallmark pathway")
+ggsave("sf3b1_k700e_fig/barplot_mut_top_hallmark.pdf", width = 8, height = 4)
+
+wt_df <- wt.gsea.result@result[1:10, ]
+wt_df$Description <- factor(wt_df$Description, levels = rev(wt_df$Description))
+ggplot(wt_df, aes(x = NES, y = Description)) + 
+  geom_col(fill = c1, width = 0.7) +
+  theme_minimal() +
+  scale_fill_manual(values = c2) +
+  theme(axis.text.y=element_text(face="bold",size=10,hjust=0),
+        axis.line.x=element_line(size=0.3,color="black"),
+        axis.ticks.length.x=unit(-0.20,"cm"),
+        axis.text.x=element_text(margin=margin(t=0.3,unit="cm")),
+        panel.grid.major=element_blank()) +
+  ylab(NULL) +
+  xlab("Normalized enrichment score") + 
+  ggtitle("Top hallmark pathway")
+ggsave("sf3b1_k700e_fig/barplot_wt_top_hallmark.pdf", width = 8, height = 4)
+```
+
+
+
+
+
+
+
+
+
+
+
+#end
