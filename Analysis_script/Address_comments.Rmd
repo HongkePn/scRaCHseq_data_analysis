@@ -1,0 +1,1499 @@
+---
+title: "Address reviewers' comments"
+author: "Hongke Peng"
+date: "2024-06-12"
+output: html_document
+---
+
+```{r}
+library(data.table)
+library(SingleCellExperiment)
+library(Seurat)
+library(readxl)
+#library(Gviz)
+library(Rsamtools)
+library(rtracklayer)
+library(GenomicAlignments)
+library(Rsamtools)
+```
+
+
+```{r, fig.width=6, fig.height=5}
+fq <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/demultiplex/")
+fq <- fq[grep("fq.gz", fq)]
+sample.ls <- sapply(strsplit(fq, "\\."), function(x){x[1]})
+
+all_info <- data.frame()
+
+for(i in sample.ls){
+print(paste("now working on", i, "================================="))
+bamPath <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/", i, "_align2genome.bam")
+
+#read in SF3B1 gene region
+mygene <- GRanges(seqnames = "chr2", 
+                  ranges = IRanges(197405131, 197405135),
+                  strand = "-")
+x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+
+#table(x)
+df <- data.frame(read_name = names(as.character(x)), pos = as.character(x))
+df$pos_1 <- substring(df$pos, 1, 1) == "T"
+df$pos_2 <- substring(df$pos, 3, 3) == "T"
+df$pos_3 <- substring(df$pos, 5, 5) == "T"
+df$mis_match_score <- rowSums(df[, c("pos_1", "pos_2", "pos_3")])
+df$bc <- sapply(strsplit(df$read_name, "_"), function(x){x[1]})
+df$bc_umi <- sapply(strsplit(df$read_name, "#"), function(x){x[1]})
+
+#select the row with mis-match score = 0 
+df2 <- df[df$mis_match_score == 0, ]
+
+
+tmp <- data.frame(raw_cell = length(unique(df$bc)), 
+                  raw_umi = length(unique(df$bc_umi)),
+                  filtered_cell = length(unique(df2$bc)), 
+                  filtered_umi = length(unique(df2$bc_umi)),
+                  sample = i)
+all_info <- rbind(all_info, tmp)
+}
+
+all_info$raw <- all_info$raw_umi / all_info$raw_cell
+all_info$filtered <- all_info$filtered_umi / all_info$filtered_cell
+
+backup <- all_info
+# plot_df <- gather(all_info, category, count, raw:filtered)
+# plot_df$category <- factor(plot_df$category, levels = c("raw", "filtered"))
+# ggplot(plot_df, aes(x = sample, y = count, fill = category)) +
+#   geom_col(position = "identity") +
+#   theme_bw() +
+#   scale_fill_manual(values = c("grey", "grey50")) +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# ggsave("QC_step2_figure/barplot_reads_left_after_artifact_removal.pdf", width = 5.5, height = 5)
+```
+
+
+
+
+# saturation plot
+##SF3B1
+```{r}
+#use CLL141i as an example
+#fq <- "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/demultiplex/CLL141i.fq.gz"
+#fq <- "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/CLL141i.fq.gz"
+#x <- Biostrings::readDNAStringSet(fq, format = "fastq")
+
+bamPath <- "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/CLL141i_align2genome.bam"
+#bamPath <- "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_bam/CLL141i_align2genome.bam"
+#bamPath <- "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_fastq/flames_out/CLL141i_align2genome.bam"
+#read in SF3B1 gene region
+mygene <- GRanges(seqnames = "chr2", 
+                  ranges = IRanges(197388515, 197435079),
+                  strand = "-")
+
+x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+
+y <- sapply(strsplit(names(x), "_"), function(x){x[2]})
+y <- sapply(strsplit(y, "#"), function(x){x[1]})
+
+#every time pick up n = n + 1000 reads
+df <- data.frame()
+for (i in 0:floor(length(y) / 50000)) {
+  n <- i * 50000
+  z <- y[sample(1:length(y), n)]
+  df <- rbind(df, c(n, sum(!duplicated(z))))
+}
+colnames(df) <- c("reads", "UMIs")
+library(ggplot2)
+ggplot(df, aes(x = reads, y = UMIs)) + 
+  geom_point() + 
+  theme_classic()
+```
+
+```{r}
+#Sequencing saturation
+sum(duplicated(y)) / length(y) # = 85.3%
+```
+
+
+```{r}
+q <- table(y)
+UMIs_duplications <- data.frame(q)
+colnames(UMIs_duplications) <- c("umi", "count")
+#UMIs > 1
+z <- UMIs_duplications[UMIs_duplications$count > 1, ]
+z <- y[y %in% z$umi]
+##every time pick up n = n + 10000 reads
+df1 <- data.frame()
+for (i in 0:floor(length(z) / 10000)) {
+  n <- i * 10000
+  v <- z[sample(1:length(z), n)]
+  df1 <- rbind(df1, c(n, sum(!duplicated(v))))
+}
+colnames(df1) <- c("reads", "UMIs")
+df1$category <- "UMIs > 1"
+
+#UMIs = 1
+z <- UMIs_duplications[UMIs_duplications$count == 1, ]
+z <- y[y %in% z$umi]
+##every time pick up n = n + 10000 reads
+df2 <- data.frame()
+for (i in 0:floor(length(z) / 5000)) {
+  n <- i * 5000
+  v <- z[sample(1:length(z), n)]
+  df2 <- rbind(df2, c(n, sum(!duplicated(v))))
+}
+colnames(df2) <- c("reads", "UMIs")
+df2$category <- "UMIs = 1"
+
+df <- rbind(df1, df2)
+
+library(ggplot2)
+ggplot(df, aes(x = reads, y = UMIs, colour = category)) + 
+  geom_point() + 
+  theme_classic() + 
+  scale_color_manual(values = c("grey50", "black")) +
+  ggtitle("Transcripts mapping to SF3B1 after QC#1, CLL141i") +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 15)) 
+ggsave("address_comments_fig/CLL141i_saturation_plot.pdf", width = 6, height = 5)
+```
+
+```{r}
+fq <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/demultiplex/")
+fq <- fq[grep("fq.gz", fq)]
+sample.ls <- sapply(strsplit(fq, "\\."), function(x){x[1]})
+
+all_info <- data.frame()
+
+for(i in sample.ls){
+print(paste("now working on", i, "================================="))
+bamPath <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/", i, "_align2genome.bam")
+mygene <- GRanges(seqnames = "chr2", 
+                  ranges = IRanges(197388515, 197435079),
+                  strand = "-")
+
+x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+
+y <- sapply(strsplit(names(x), "_"), function(x){x[2]})
+y <- sapply(strsplit(y, "#"), function(x){x[1]})
+q <- table(y)
+UMIs_duplications <- data.frame(q)
+colnames(UMIs_duplications) <- c("umi", "count")
+#UMIs > 1
+z <- UMIs_duplications[UMIs_duplications$count > 1, ]
+z <- y[y %in% z$umi]
+##every time pick up n = n + 10000 reads
+df1 <- data.frame()
+for (j in 0:floor(length(z) / 10000)) {
+  n <- j * 10000
+  v <- z[sample(1:length(z), n)]
+  df1 <- rbind(df1, c(n, sum(!duplicated(v))))
+}
+colnames(df1) <- c("reads", "UMIs")
+df1$category <- i
+
+all_info <- rbind(all_info, df1)
+}
+library(ggplot2)
+ggplot(all_info, aes(x = reads, y = UMIs, colour = category)) + 
+  geom_point(size = 0.8) + 
+  geom_line() +
+  #geom_smooth(se = F) +
+  theme_classic() + 
+  #scale_color_manual(values = c("grey50", "black")) +
+  ggtitle("Transcripts (UMIs > 1) mapping to SF3B1 after QC#1") +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 15)) 
+ggsave("address_comments_fig/sf3b1_saturation_curve.pdf", width = 7, height = 5)
+write.csv(all_info, "address_comments_fig/sf3b1_saturation.csv")
+```
+
+
+```{r}
+fq <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/demultiplex/")
+fq <- fq[grep("fq.gz", fq)]
+sample.ls <- sapply(strsplit(fq, "\\."), function(x){x[1]})
+
+all_info <- data.frame()
+
+for(i in sample.ls){
+print(paste("now working on", i, "================================="))
+bamPath <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/", i, "_align2genome.bam")
+mygene <- GRanges(seqnames = "chr2", 
+                  ranges = IRanges(197388515, 197435079),
+                  strand = "-")
+
+x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+
+y <- sapply(strsplit(names(x), "_"), function(x){x[2]})
+y <- sapply(strsplit(y, "#"), function(x){x[1]})
+sat_rate <- sum(duplicated(y)) / length(y)
+all_info <- rbind(all_info, c(i, sat_rate))
+}
+colnames(all_info) <- c("sample", "saturation_rate")
+all_info$saturation_rate <- as.numeric(all_info$saturation_rate)
+all_info$saturation_rate2 <- round(all_info$saturation_rate, digits = 1)
+all_info
+ggplot(all_info, aes(x = sample, y = saturation_rate)) +
+  geom_point() + 
+  ylim(c(0, 1)) + 
+  theme_classic() +
+  ggtitle("Sequencing saturation, reads mapping to SF3B1") +
+  theme(axis.text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(size = 15)) 
+ggsave("address_comments_fig/all_sample_SF3B1_saturation_plot.pdf", width = 6, height = 5)
+```
+
+
+##BTK
+```{r}
+#use CLL141i as an example
+#fq <- "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/demultiplex/CLL141i.fq.gz"
+#fq <- "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/CLL141i.fq.gz"
+#x <- Biostrings::readDNAStringSet(fq, format = "fastq")
+
+bamPath <- "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/CLL141i_align2genome.bam"
+#bamPath <- "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_bam/CLL141i_align2genome.bam"
+#bamPath <- "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_fastq/flames_out/CLL141i_align2genome.bam"
+#read in SF3B1 gene region
+mygene <- GRanges(seqnames = "chrX", 
+                  ranges = IRanges(101349338, 101390796),
+                  strand = "-")
+
+x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+
+y <- sapply(strsplit(names(x), "_"), function(x){x[2]})
+y <- sapply(strsplit(y, "#"), function(x){x[1]})
+
+#every time pick up n = n + 1000 reads
+df <- data.frame()
+for (i in 0:floor(length(y) / 10000)) {
+  n <- i * 10000
+  z <- y[sample(1:length(y), n)]
+  df <- rbind(df, c(n, sum(!duplicated(z))))
+}
+colnames(df) <- c("reads", "UMIs")
+library(ggplot2)
+ggplot(df, aes(x = reads, y = UMIs)) + 
+  geom_point() + 
+  theme_classic() +
+  ggtitle("Transcripts mapping to BTK after QC#1, CLL141i") +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 15)) 
+```
+
+```{r}
+#Sequencing saturation
+sum(duplicated(y)) / length(y) # = 82.3%
+```
+
+
+```{r}
+q <- table(y)
+UMIs_duplications <- data.frame(q)
+colnames(UMIs_duplications) <- c("umi", "count")
+#UMIs > 1
+z <- UMIs_duplications[UMIs_duplications$count > 1, ]
+z <- y[y %in% z$umi]
+##every time pick up n = n + 10000 reads
+df1 <- data.frame()
+for (i in 0:floor(length(z) / 5000)) {
+  n <- i * 5000
+  v <- z[sample(1:length(z), n)]
+  df1 <- rbind(df1, c(n, sum(!duplicated(v))))
+}
+colnames(df1) <- c("reads", "UMIs")
+df1$category <- "UMIs > 1"
+
+#UMIs = 1
+z <- UMIs_duplications[UMIs_duplications$count == 1, ]
+z <- y[y %in% z$umi]
+##every time pick up n = n + 10000 reads
+df2 <- data.frame()
+for (i in 0:floor(length(z) / 2000)) {
+  n <- i * 2000
+  v <- z[sample(1:length(z), n)]
+  df2 <- rbind(df2, c(n, sum(!duplicated(v))))
+}
+colnames(df2) <- c("reads", "UMIs")
+df2$category <- "UMIs = 1"
+
+df <- rbind(df1, df2)
+
+library(ggplot2)
+ggplot(df, aes(x = reads, y = UMIs, colour = category)) + 
+  geom_point() + 
+  theme_classic() + 
+  scale_color_manual(values = c("grey50", "black")) +
+  ggtitle("Transcripts mapping to BTK after QC#1, CLL141i") +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 15)) 
+ggsave("address_comments_fig/CLL141i_BTK_saturation_plot.pdf", width = 6, height = 5)
+```
+
+
+```{r}
+fq <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/demultiplex/")
+fq <- fq[grep("fq.gz", fq)]
+sample.ls <- sapply(strsplit(fq, "\\."), function(x){x[1]})
+
+all_info <- data.frame()
+
+for(i in sample.ls){
+print(paste("now working on", i, "================================="))
+bamPath <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/", i, "_align2genome.bam")
+mygene <- GRanges(seqnames = "chrX", 
+                  ranges = IRanges(101349338, 101390796),
+                  strand = "-")
+
+x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+
+y <- sapply(strsplit(names(x), "_"), function(x){x[2]})
+y <- sapply(strsplit(y, "#"), function(x){x[1]})
+sat_rate <- sum(duplicated(y)) / length(y)
+all_info <- rbind(all_info, c(i, sat_rate))
+}
+colnames(all_info) <- c("sample", "saturation_rate")
+all_info$saturation_rate <- as.numeric(all_info$saturation_rate)
+all_info$saturation_rate2 <- round(all_info$saturation_rate, digits = 1)
+all_info
+ggplot(all_info, aes(x = sample, y = saturation_rate)) +
+  geom_point() + 
+  ylim(c(0, 1)) + 
+  theme_classic() +
+  ggtitle("Sequencing saturation, reads mapping to BTK") +
+  theme(axis.text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(size = 15)) 
+ggsave("address_comments_fig/all_sample_BTK_saturation_plot.pdf", width = 6, height = 5)
+```
+
+```{r}
+fq <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/demultiplex/")
+fq <- fq[grep("fq.gz", fq)]
+sample.ls <- sapply(strsplit(fq, "\\."), function(x){x[1]})
+
+all_info <- data.frame()
+
+for(i in sample.ls){
+print(paste("now working on", i, "================================="))
+bamPath <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/", i, "_align2genome.bam")
+mygene <- GRanges(seqnames = "chrX", 
+                  ranges = IRanges(101349338, 101390796),
+                  strand = "-")
+
+x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+
+y <- sapply(strsplit(names(x), "_"), function(x){x[2]})
+y <- sapply(strsplit(y, "#"), function(x){x[1]})
+q <- table(y)
+UMIs_duplications <- data.frame(q)
+colnames(UMIs_duplications) <- c("umi", "count")
+#UMIs > 1
+z <- UMIs_duplications[UMIs_duplications$count > 1, ]
+z <- y[y %in% z$umi]
+##every time pick up n = n + 10000 reads
+df1 <- data.frame()
+for (j in 0:floor(length(z) / 10000)) {
+  n <- j * 10000
+  v <- z[sample(1:length(z), n)]
+  df1 <- rbind(df1, c(n, sum(!duplicated(v))))
+}
+colnames(df1) <- c("reads", "UMIs")
+df1$category <- i
+
+all_info <- rbind(all_info, df1)
+}
+library(ggplot2)
+ggplot(all_info, aes(x = reads, y = UMIs, colour = category)) + 
+  geom_point(size = 0.8) + 
+  geom_line() +
+  #geom_smooth(se = F) +
+  theme_classic() + 
+  #scale_color_manual(values = c("grey50", "black")) +
+  ggtitle("Transcripts (UMIs > 1) mapping to BTK after QC#1") +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 15)) 
+ggsave("address_comments_fig/btk_saturation_curve.pdf", width = 7, height = 5)
+write.csv(all_info, "address_comments_fig/btk_saturation.csv")
+```
+
+```{r}
+y <- y[duplicated(y)]
+q <- table(y)
+UMIs_duplications <- data.frame(q)
+colnames(UMIs_duplications) <- c("umi", "count")
+ggplot(UMIs_duplications, aes(x = count)) + 
+  geom_histogram(binwidth = 1) + 
+  xlim(c(0, 10))
+```
+
+```{r}
+library(SingleCellExperiment)
+o <- readRDS("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/sces.rds")
+o <- o$CLL141i
+o1 <- o[rowData(o)$gene_id == "ENSG00000115524.16",]
+```
+
+#FLT-seq DE
+```{r}
+cll153 <- read.csv("/stornext/Genomics/data/CLL_venetoclax/FLTseq/cll153/mutation_known/alt_cnt.csv")
+rownames(cll153) <- paste(cll153$chr, cll153$position, sep = "_")
+cll153$chr <- NULL
+cll153$position <- NULL
+
+x <- cll153[, 1:3]
+x$position <- rownames(x)
+View(x)
+
+
+df <- data.frame()
+cb_ls <- c()
+for (i in c("cll153", "cll156", "cll155", "cll5306")) {
+  x <- read.csv(paste0("/stornext/Genomics/data/CLL_venetoclax/FLTseq/", i, "/mutation_known/alt_cnt.csv.gz"))
+  rownames(x) <- paste(x$chr, x$position, sep = "_")
+  x$chr <- NULL
+  x$position <- NULL
+  df <- rbind(df, c(i, sum(x["chr2_197402109", ] > 1)))
+  
+  cb <- paste0(i, "_", colnames(x)[x["chr2_197402109", ] > 1], "-1")
+  cb_ls <- c(cb_ls, cb)
+}
+
+colnames(df) <- c("sample", "cell_num")
+ggplot(df, aes(x = sample, y = as.numeric(cell_num))) + 
+  geom_col() + 
+  theme_classic() + 
+  ggtitle("FLT-seq data, cells with SF3B1 K700E mutation") +
+  ylab("Cell counts") +
+  theme(axis.text = element_text(size = 12),
+        #axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(size = 15)) 
+ggsave("address_comments_fig/FLTseq_SF3B1_k700e.pdf", width = 5, height = 5)
+```
+
+```{r}
+cll153 <- read.csv("/stornext/Genomics/data/CLL_venetoclax/FLTseq/cll153/mutation_known/alt_cnt.csv")
+rownames(cll153) <- paste(cll153$chr, cll153$position, sep = "_")
+cll153$chr <- NULL
+cll153$position <- NULL
+
+x <- cll153[, 1:3]
+x$position <- rownames(x)
+View(x)
+
+
+df <- data.frame()
+cb_ls <- c()
+for (i in c("cll153", "cll156", "cll155", "cll5306")) {
+  x <- read.csv(paste0("/stornext/Genomics/data/CLL_venetoclax/FLTseq/", i, "/mutation_known/alt_cnt.csv.gz"))
+  rownames(x) <- paste(x$chr, x$position, sep = "_")
+  x$chr <- NULL
+  x$position <- NULL
+  df <- rbind(df, c(i, sum(x["chr2_197402109", ] > 2)))
+  
+  cb <- paste0(i, "_", colnames(x)[x["chr2_197402109", ] > 2], "-1")
+  cb_ls <- c(cb_ls, cb)
+}
+
+colnames(df) <- c("sample", "cell_num")
+ggplot(df, aes(x = sample, y = as.numeric(cell_num))) + 
+  geom_col() + 
+  theme_classic() + 
+  ggtitle("FLT-seq data, cells with SF3B1 K700E mutation") +
+  ylab("Cell counts") +
+  theme(axis.text = element_text(size = 12),
+        #axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(size = 15)) 
+ggsave("address_comments_fig/FLTseq_SF3B1_k700e>2.pdf", width = 5, height = 5)
+```
+
+
+```{r}
+cb_ls <- gsub("cll", "CLL", cb_ls)
+
+library(Seurat)
+sr <- readRDS("make_srt_object/sr_data.rds")
+b <- subset(sr, refined.cluster %in% 1:10)
+b$compare <- "background"
+b$compare[colnames(b) %in% ref_group] <- "ref"
+b$compare[colnames(b) %in% mut_group] <- "mut"
+table(b$compare)
+DefaultAssay(b) <- "RNA"
+
+colset <- c("#A9A9A9", 
+            "#F055A3", "#A56AAC", "#D99ACE", "#DCBFDD", "#77B3DA", "#4CBBD5", "#A5D0F0", "#528DD9", "#7876B1B2","#4DBBD5B2","#00A1D5B2",
+            "#9BCA3C", "#91D1C2", "#5FB14E", "#CADB73", "#3B897C")
+  
+DimPlot(object = b, reduction = "mnn_umap", order = F, group.by = "refined.cluster", 
+        cols = colset, raster = T, pt.size = 0.3,
+        label = T, label.box = T, label.color = "white", label.size = 3)
+```
+
+
+```{r}
+sum(cb_ls %in% colnames(b))
+```
+
+##lib20 UMAP
+```{r}
+sampleID_annotation <- read_excel(path="/stornext/Genomics/data/CLL_venetoclax/workspace/T_under_VEN/Aim1/sampleID_annotation.xlsx")
+sample <- c("CLL156", "CLL153", "CLL5306", "CLL155",# mutant
+            "CLL108", "CLL141v", "CLL152", "CLL170v", "CLL175", "CLL232", "CLL5309", "CLL5602") # WT
+#make pathway
+dir_list = list()
+for (i in sample) {
+  setwd("/stornext/Genomics/data/CLL_venetoclax/workspace/T_under_VEN/Aim1/")
+  print(i)
+  dir_list[[paste(i,"lib20",sep="_")]] = file.path("/stornext/Genomics/data/CLL_venetoclax/workspace/T_under_VEN/Aim1/cr_output",i, "filtered_feature_bc_matrix20")
+}
+pathway <- unlist(dir_list)
+
+#make seurat
+data10X=Read10X(pathway)
+srt=CreateSeuratObject(counts=data10X$`Gene Expression`, min.cells=10)
+
+#make meta data
+srt$patient=srt$orig.ident
+srt[["percent.mt"]]=PercentageFeatureSet(srt,pattern="^MT-")
+```
+
+
+##quality control
+```{r,fig.width=15,fig.height=5}
+VlnPlot(srt,features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), ncol = 3, pt.size = 0)
+```
+
+I will not run QC here to keep more cells. 
+
+```{r, fig.width=7, fig.height=5}
+srt <- NormalizeData(srt)
+srt <- FindVariableFeatures(srt, nfeatures = 2000)
+srt <- ScaleData(srt)
+srt <- RunPCA(srt)
+
+theta.to.use <- 2
+srt=RunHarmony(srt,
+               group.by.vars="patient",
+               reduction="pca",
+               theta=theta.to.use,
+               plot_convergence=TRUE,
+               reduction.save="harmony_pca",
+               kmeans_init_nstart=1000,
+               kmeans_init_iter_max=500000)
+
+
+srt <- RunUMAP(srt ,reduction = "harmony_pca", dims=1:30, reduction.name = "harmony_umap", reduction.key = "harmony_umap_")
+
+DimPlot(object = srt, reduction = "harmony_umap", group.by = "orig.ident", 
+        cols=c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), order=T)
+```
+
+```{r, fig.width=6, fig.height=5}
+srt <- FindNeighbors(srt, reduction = "harmony_pca", dims = 1:30, graph.name = "h")
+srt <- FindClusters(srt, graph.name = "h", resolution = 0.8)
+DimPlot(object = srt, reduction = "harmony_umap", order = F, raster = T,
+        cols = c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), 
+        label = T, label.box = T)
+ggsave("address_comments_fig/FLTseq_lib20_umap.pdf", width = 6, height = 5)
+```
+```{r}
+mut_df <- data.frame(srt@reductions$harmony_umap@cell.embeddings, 
+                     mut = srt$SF3B1)
+
+mut_df_1 <- mut_df[mut_df$mut == "K700E", ]
+mut_df_1$patient <- sapply(strsplit(rownames(mut_df_1), "_"), function(x){x[1]})
+mut_df_1 <- mut_df_1[mut_df_1$patient %in% c("CLL153", "CLL156", "CLL155", "CLL5306"), ]
+  
+ggplot(mut_df) + 
+  geom_point(aes(x = harmonyumap_1, y = harmonyumap_2), color = "grey", size = 0.1) +
+  theme_bw() + 
+  geom_point(data = mut_df_1, aes(x = harmonyumap_1, y = harmonyumap_2), color = "#BC3C2999", size = 1) +
+  xlab("UMAP_1") +
+  ylab("UMAP_2")
+ggsave("address_comments_fig/FLTseq_K700E_UMAP.pdf", width = 6, height = 5)
+```
+
+
+
+
+short-read data QC
+```{r, fig.width=15, fig.height=8}
+VlnPlot(srt, features = c("nCount_RNA", "nFeature_RNA", "percent.mt", "CD19", "MS4A1", "TCL1A", "BTK", "CD3E", "GNLY", "NKG7", "SF3B1", "CD14"), pt.size = 0, cols = c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)))
+ggsave("address_comments_fig/FLTseq_qc_vlnplot.pdf", width = 15, height = 7)
+```
+##Find cells with the mutation
+```{r}
+cb_ls <- c()
+for (i in c("cll153", "cll156", "cll155", "cll5306")) {
+  x <- read.csv(paste0("/stornext/Genomics/data/CLL_venetoclax/FLTseq/", i, "/mutation_known/alt_cnt.csv.gz"))
+  rownames(x) <- paste(x$chr, x$position, sep = "_")
+  x$chr <- NULL
+  x$position <- NULL
+  
+  cb <- paste0(i, "_lib20_", colnames(x)[x["chr2_197402109", ] > 0], "-1")
+  cb_ls <- c(cb_ls, cb)
+}
+
+
+cb_ls <- gsub("cll", "CLL", cb_ls)
+#cb_ls <- gsub("_", "_lib20_", cb_ls)
+sum(cb_ls %in% colnames(srt))
+
+srt$SF3B1 <- "WT"
+srt$SF3B1[colnames(srt) %in% cb_ls] <- "K700E"
+
+srt$category <- "WT_sample"
+srt$category[srt$patient %in% c("CLL156", "CLL153", "CLL5306", "CLL155")] <- "Mutant_sample"
+
+df <- table(srt$seurat_clusters, srt$SF3B1) %>% as.data.frame()
+colnames(df) <- c("cluster", "SF3B1_status", "nCell")
+df <- df[df$SF3B1_status == "K700E", ]
+ggplot(df, aes(x = cluster, y = nCell)) + 
+  geom_col() +
+  theme_classic() + 
+  ggtitle("Cells with SF3B1 K700E transcripts > 0") +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 15)) 
+ggsave("address_comments_fig/FLTseq_mutant_in_T.pdf", width = 6, height = 6)
+```
+
+## Pseudo-bulk analysis
+```{r}
+#rm all mutant cells in T-cell clusters
+srt <- subset(srt, seurat_clusters %in% c(0:5, 11, 12))
+#rm all wt cells from mutant samples
+discards <- srt$category == "Mutant_sample" & srt$SF3B1 == "WT"
+srt <- srt[, !discards]
+
+df <- table(srt$patient, srt$SF3B1) %>% as.data.frame()
+colnames(df) <- c("sample", "SF3B1", "nCell")
+ggplot(df, aes(x = sample, y = nCell, fill = SF3B1)) + 
+  geom_col() +
+  theme_classic() + 
+  ggtitle("Cells counts for pseudo-bulk DE analysis (> 30 cells)") +
+  theme(axis.text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(size = 15)) 
+ggsave("address_comments_fig/FLTseq_nCell_for_DE.pdf", width = 7, height = 5)
+```
+
+
+
+```{r,fig.width=16,fig.height=5}
+pt = srt
+pt$orig.ident <- factor(pt$orig.ident, levels = unique(pt$orig.ident))
+
+#make sce
+matr=pt@assays$RNA@counts
+#md=pt@meta.data[,c("compare","orig.ident")]
+md=pt@meta.data[,c("SF3B1","orig.ident")]
+sce=SingleCellExperiment(assay=list(counts=matr),colData=md)
+
+pool=scater::aggregateAcrossCells(sce,id=colData(sce)[,c("SF3B1","orig.ident")])
+
+y=pool
+y=DGEList(counts=counts(y),samples=colData(y),remove.zeros=T)
+y$samples$stage <- "R"
+y$samples$stage[y$samples$orig.ident %in% c("CLL156", "CLL5306", "CLL5309", "CLL5602", "CLL5305", "CLL108")] <- "S"
+y$samples$stage[y$samples$orig.ident %in% c("CLL141i", "CLL170i")] <- "RB"
+
+y$samples$sf3b1 <- "WT"
+y$samples$sf3b1[y$samples$orig.ident %in% c("CLL153", "CLL155", "CLL156", "CLL5306")] <- "MUT"
+
+#filtering 
+keep=filterByExpr(y,group=y$samples$sf3b1)
+summary(keep)#rm:10098,retain:8726
+y=y[keep,,keep.lib.sizes=FALSE]
+#calculate normalization factors
+y=calcNormFactors(y)
+#plot MDS
+mds=plotMDS.DGEList(y,plot=F)
+gg_df=data.frame(mds[c("x","y")],
+                 patient_id=y$samples$orig.ident,
+                 group_id=y$samples$sf3b1,
+                 stage = y$samples$stage)
+
+c1=adjustcolor("#0072B2",0.5)
+c2=adjustcolor("#B20072",0.5)
+
+#getPalette=colorRampPalette(brewer.pal(10,"Set1"))
+p1 <- ggplot(gg_df,aes(x,y,col=group_id,shape=stage))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p2 <- ggplot(gg_df,aes(x,y,col=stage))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    #scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p3 <- ggplot(gg_df,aes(x,y,col=patient_id))+
+    geom_point(size=4,alpha=0.8)+
+    labs(x="MDS dim1",y="MDS dim2")+
+    theme(panel.grid.minor=element_blank())+
+    #scale_color_manual(values = c(c1, c2))+ 
+    #coord_fixed()+
+    #ggtitle(paste0(i," MDS plot"))+
+    ggtitle("MDS plot: basic clusters") +
+    #scale_color_manual(values=c1)+
+    theme_bw()
+p <- p1 + p2 + p3
+p
+ggsave(plot = p, filename = "address_comments_fig/mds_sf3b1_mut_vs_wt.pdf", width = 16, height = 5)
+```
+
+```{r, fig.width=7, fig.height=8}
+#make design
+#f1=factor(y$samples$compare,levels=c("mut","ref"))
+f1=factor(y$samples$sf3b1,levels=c("MUT","WT"))
+f2=factor(y$samples$stage, levels = c("S", "R"))
+design=model.matrix(~0+f1+f2)
+colnames(design)=gsub("f\\d","",colnames(design))
+  
+#make contrast
+contr=makeContrasts(
+    mut_vs_ref=MUT-WT,
+    levels=colnames(design)
+  )
+
+y=estimateDisp(y,design)
+plotBCV(y)
+  
+fit=glmFit(y,design)
+lrt=glmLRT(fit,contrast=contr)
+#fit=glmQLFit(y,design)
+#lrt=glmQLFTest(fit,contrast=contr)
+DEG=topTags(lrt,n=Inf)
+  
+#the proportion of cell express this gene
+df=DEG$table
+df$gene <- rownames(df)
+write.csv(df, "address_comments_fig/edgeR_sf3b1_mut_vs_wt.csv")
+#df <- read.csv("sf3b1_k700e_fig/edgeR_sf3b1_mut_vs_wt.csv")
+#no significant DEGs :)
+selected_df <- df[!grepl("^IG", df$gene), ]
+
+EnhancedVolcano::EnhancedVolcano(selected_df,
+                x="logFC",y="PValue",
+                lab=rownames(selected_df),
+                xlim=c(-10,10),
+                #ylim=c(0,20),
+                #title = paste("DE gene in",i),
+                subtitle = paste0('FDR cutoff = 0.05', "  logFC cutoff = 1"),
+                labSize = 4, 
+                raster = T,
+                legendPosition = "top",
+                legendLabSize = 12,
+                legendIconSize = 4.0,
+                boxedLabels = T,
+                max.overlaps = 100,
+                drawConnectors = T,
+                pCutoff = 0.05,
+                FCcutoff = 1)
+ggsave("address_comments_fig/volcano_mut_vs_wt_rmIG.pdf", width = 7, height = 8)
+
+EnhancedVolcano::EnhancedVolcano(df,
+                x="logFC",y="PValue",
+                lab=rownames(df),
+                #xlim=c(-10,10),
+                #ylim=c(0,20),
+                #title = paste("DE gene in",i),
+                subtitle = paste0('FDR cutoff = 0.05', "  logFC cutoff = 1"),
+                labSize = 5, 
+                raster = T,
+                legendPosition = "top",
+                legendLabSize = 12,
+                legendIconSize = 4.0,
+                boxedLabels = T,
+                drawConnectors = T,
+                pCutoff = 0.05,
+                FCcutoff = 1)
+ggsave("address_comments_fig/volcano_mut_vs_wt.pdf", width = 7, height = 8)
+```
+
+
+```{r}
+saveRDS(srt, "address_comments_fig/FLTseq_srt.rds")
+srt <- readRDS("address_comments_fig/FLTseq_srt.rds")
+```
+
+
+#Read length after fexiplex
+
+```{r}
+x <- Biostrings::readDNAStringSet("/stornext/General/scratch/GP_Transfer/wang.ch/demultiplexed.fastq", format = "fastq")
+df <- Biostrings::width(x)
+df <- data.frame(length = df)
+
+library(ggplot2)
+ggplot(df, aes(x = length)) + geom_histogram(bins = 70, alpha = 0.7, position="identity") + 
+       scale_x_continuous(limits = c(0, 5000), breaks = seq(0, 5000, 500)) +
+       ggtitle("Read Length Distribution of AML data, demultiplexed by Flexiplex") +
+       xlab("length (bp)") + 
+       ylab("Read counts") + 
+  #scale_fill_manual(values = c("grey80", "grey70", "grey50")) + 
+  #scale_fill_manual(values = c("#2f83e4", "#00e5c1", "#23cbff")) + 
+       theme_bw() + 
+  theme(axis.text = element_text(size = 12))
+ggsave("address_comments_fig/AML_data_distr.png", width = 7, height = 5)
+```
+
+##Find KVR700**R mutation
+
+```{r}
+sampleID_annotation <- read_excel(path="/stornext/Genomics/data/CLL_venetoclax/workspace/T_under_VEN/Aim1/sampleID_annotation.xlsx")
+sample <- "CLL318"
+#make pathway
+pathway = file.path("/stornext/Genomics/data/CLL_venetoclax/workspace/T_under_VEN/Aim1/cr_output",sample, "filtered_feature_bc_matrix20")
+
+
+#make seurat
+data10X=Read10X(pathway)
+srt=CreateSeuratObject(counts=data10X$`Gene Expression`, min.cells=10)
+
+#make meta data
+srt$patient=srt$orig.ident
+srt[["percent.mt"]]=PercentageFeatureSet(srt,pattern="^MT-")
+```
+```{r,fig.width=8,fig.height=5}
+VlnPlot(srt,features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), ncol = 3, pt.size = 0)
+```
+
+I will not run QC here to keep more cells. 
+
+```{r, fig.width=7, fig.height=5}
+srt <- NormalizeData(srt)
+srt <- FindVariableFeatures(srt, nfeatures = 2000)
+srt <- ScaleData(srt)
+srt <- RunPCA(srt)
+
+srt <- RunUMAP(srt ,reduction = "pca", dims=1:30, reduction.name = "umap", reduction.key = "umap_")
+
+DimPlot(object = srt, reduction = "umap", group.by = "orig.ident", 
+        cols=c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), order=T)
+```
+
+
+```{r, fig.width=6, fig.height=5}
+srt <- FindNeighbors(srt, reduction = "pca", dims = 1:30, graph.name = "h")
+srt <- FindClusters(srt, graph.name = "h", resolution = 0.8)
+DimPlot(object = srt, reduction = "umap", order = F, raster = T,
+        cols = c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), 
+        label = T, label.box = T)
+ggsave("address_comments_fig/FLTseq_cll318_umap.pdf", width = 6, height = 5)
+```
+
+
+```{r, fig.width=15, fig.height=8}
+VlnPlot(srt, features = c("nCount_RNA", "nFeature_RNA", "percent.mt", "CD19", "MS4A1", "TCL1A", "BTK", "CD3E", "GNLY", "NKG7", "SF3B1", "CD14"), pt.size = 0, cols = c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)))
+ggsave("address_comments_fig/FLTseq_CLL318_qc_vlnplot.pdf", width = 15, height = 7)
+```
+
+```{r}
+srt <- subset(srt, h_res.0.8 %in% c(0, 1, 3:5))
+saveRDS(srt, "address_comments_fig/FLTseq_CLL318_srt.rds")
+```
+
+#find 6bp deletion
+```{r}
+library(Biostrings)
+library(GenomicRanges)
+library(ggplot2)
+library(Rsamtools)
+library(rtracklayer)
+library(GenomicAlignments)
+library(msigdbr)
+
+i <- "cll318"
+bamPath <- paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/FLTseq_data/filtered_polyA/flames_out/" , i, "_align2genome.bam")
+mygene <- GRanges(seqnames = "chr2", 
+                  ranges = IRanges(197402103, 197402110),
+                  strand = "-")
+x <- stackStringsFromBam(bamPath, param = mygene, use.names = T)
+x.del <- x[x == "C------T"]
+
+df.del <- data.frame(read_name = names(x.del))
+df.del$bc_umi <- sapply(strsplit(df.del$read_name, "#"), function(x){x[1]})
+df.del$bc <- sapply(strsplit(df.del$bc_umi, "_"), function(x){x[1]})
+df.del$umi <- sapply(strsplit(df.del$bc_umi, "_"), function(x){x[2]})
+  
+#add 2023-08-03 to merge UMI
+df.del <- df.del[!(duplicated(df.del$bc_umi)), ] # we have a total of 14 UMIs
+# =======
+  
+stat.del <- data.frame(table(df.del$bc)) # we have only 14 cells with this UMIs
+colnames(stat.del) <- c("bc", "count")
+stat.del$bc <- paste(stat.del$bc, "-1", sep = "")
+stat.del$patient <- i
+
+CLL_with_6del <- stat.del$bc[stat.del$bc %in% colnames(srt)] # we only have 10 CLL cells left in srt
+  
+x.wt <- x[x == "CGAACTTT"]
+
+df.wt <- data.frame(read_name = names(x.wt))
+df.wt$bc_umi <- sapply(strsplit(df.wt$read_name, "#"), function(x){x[1]})
+df.wt$bc <- sapply(strsplit(df.wt$bc_umi, "_"), function(x){x[1]})
+df.wt$umi <- sapply(strsplit(df.wt$bc_umi, "_"), function(x){x[2]})
+  
+#add 2023-0803 to merge UMI
+df.wt <- df.wt[!(duplicated(df.wt$bc_umi)), ]
+# =======
+  
+stat.wt <- data.frame(table(df.wt$bc))
+colnames(stat.wt) <- c("bc", "count")
+stat.wt$bc <- paste(stat.wt$bc, "-1", sep = "")
+stat.wt$patient <- i
+
+CLL_with_no_del <- stat.wt$bc[stat.wt$bc %in% colnames(srt)]
+```
+
+```{r}
+#make a UMAP
+srt <- NormalizeData(srt)
+srt <- FindVariableFeatures(srt, nfeatures = 2000)
+srt <- ScaleData(srt)
+srt <- RunPCA(srt)
+
+srt <- RunUMAP(srt ,reduction = "pca", dims=1:30, reduction.name = "umap", reduction.key = "umap_")
+
+DimPlot(object = srt, reduction = "umap", group.by = "orig.ident", 
+        cols=c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), order=T)
+srt <- FindNeighbors(srt, reduction = "pca", dims = 1:30, graph.name = "h")
+srt <- FindClusters(srt, graph.name = "h", resolution = 0.8)
+DimPlot(object = srt, reduction = "umap", order = F, raster = T,
+        cols = c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), 
+        label = T, label.box = T)
+ggsave("address_comments_fig/FLTseq_cll318_umap_only_CLL.pdf", width = 6, height = 5)
+```
+
+```{r}
+plot_df <- srt@reductions$umap@cell.embeddings %>% as.data.frame()
+plot_df$category <- "not_capture"
+plot_df$category[rownames(plot_df) %in% CLL_with_6del] <- "6bp_del"
+plot_df$category[rownames(plot_df) %in% CLL_with_no_del] <- "no_6bp_del"
+
+plot_df1 <- plot_df[plot_df$category == "not_capture", ]
+plot_df2 <- plot_df[plot_df$category == "6bp_del", ]
+plot_df3 <- plot_df[plot_df$category == "no_6bp_del", ]
+
+ggplot(plot_df1) + 
+  geom_point(aes(umap_1, umap_2), colour = "grey") +
+  geom_point(data = plot_df2, aes(umap_1, umap_2), colour = "red", size = 3) + 
+  geom_point(data = plot_df3, aes(umap_1, umap_2), colour = "blue", size = 3) +
+  theme_classic() + 
+  ggtitle("Cells with/without KVR700**R mutation detected by scFLT-seq")
+
+ggsave("address_comments_fig/umap_6bp_del_cll.pdf", width = 5.5, height = 5)
+```
+
+```{r}
+#DE 
+srt$compare <- "not_capture"
+srt$compare[colnames(srt) %in% CLL_with_6del] <- "6bp_del"
+srt$compare[colnames(srt) %in% CLL_with_no_del] <- "no_6bp_del"
+
+de_res <- FindMarkers(srt, ident.1 = "6bp_del", ident.2 = "no_6bp_del", group.by = "compare", logfc.threshold = 0, min.pct = 0, test.use = "MAST")
+EnhancedVolcano::EnhancedVolcano(de_res,
+                x="avg_log2FC",y="p_val_adj",
+                lab=rownames(de_res),
+                #xlim=c(-10,10),
+                #ylim=c(0,20),
+                title = "CLL cells with KVR700**R vs CLL cells without KVR700**R",
+                subtitle = paste0('FDR cutoff = 0.05', "  logFC cutoff = 1"),
+                labSize = 4, 
+                raster = T,
+                legendPosition = "top",
+                legendLabSize = 12,
+                legendIconSize = 4.0,
+                boxedLabels = T,
+                max.overlaps = 100,
+                drawConnectors = T,
+                pCutoff = 0.05,
+                FCcutoff = 1)
+ggsave("address_comments_fig/volcano_6bpdel.pdf", width = 7, height = 8)
+```
+
+##compare read loss, scFLT-seq vs scRaCH-seq
+###loss during demultiplexing
+```{r}
+x <- read.csv("address_comments_fig/demulitplexing.csv")
+x1 <- x[x$method == "scRaCHseq", ]
+x1$match <- x1$hm_match + x1$fuzzy_match
+ratio1 <- sum(x1$match) / sum(x1$total_read)
+x1 <- data.frame(ratio = c(ratio1, 1 - ratio1),
+                 category = c("demultiplexed", "loss"))
+
+p1 <- ggplot(x1, aes(x = 1, y = ratio, fill = category)) + 
+  geom_col(width = 0.5) + 
+  coord_polar(theta = "y") + 
+  theme(
+      panel.background = element_blank(),
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+    ) +
+  ggtitle("scRaCH-seq read loss after demultiplexing")
+
+x2 <- x[x$method == "scFLTseq", ]
+x2$match <- x2$hm_match + x2$fuzzy_match
+ratio2 <- sum(x2$match) / sum(x2$total_read)
+x2 <- data.frame(ratio = c(ratio2, 1 - ratio2),
+                 category = c("demultiplexed", "loss"))
+
+p2 <- ggplot(x2, aes(x = 1, y = ratio, fill = category)) + 
+  geom_col(width = 0.5) + 
+  coord_polar(theta = "y") + 
+  theme(
+      panel.background = element_blank(),
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+    ) +
+  ggtitle("scFLT-seq read loss after demultiplexing")
+
+p <- p1 + p2
+ggsave(plot = p, filename = "address_comments_fig/circle_plot_compare_method.pdf", width = 11, height = 5)
+```
+
+###loss during QC #1
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(Biostrings)
+
+# QC for FLT-seq data
+
+fq <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/FLTseq_data/demultiplex/")
+fq <- fq[grep("fq.gz", fq)]
+
+big_plot <- data.frame()
+for (i in fq) {
+  print(paste(i, '=================================='))
+  x <- Biostrings::readDNAStringSet(paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/FLTseq_data/demultiplex/", i), format = "fastq")
+
+  info <- data.frame(length = width(x), 
+                     ID = names(x))
+  #subset the beginning of each read
+  #rm reads that are less than 15 and longer than 20000
+  print(paste(i, "reads shorter than 15bp:", sum(info$length < 15)))
+  print(paste(i, "reads longer than 20000bp:", sum(info$length > 20000)))
+  keep_df <- info$ID[info$length > 15 & info$length < 20000] 
+  
+  
+  print(paste(i, 'find tso ========================='))
+  #find TSO in reads
+  x.sub <- x[keep_df]
+  rm(x)
+  x.start <- subseq(x.sub, start = 1, end = 15)
+  ##set mis-match as 3
+  y_length_df <- data.frame(length = width(x.sub),
+                            category = "demultiplexed")
+  
+  x.start <- x.start[vcountPattern("CTTATATGGG", x.start, max.mismatch = 3) > 0]
+  x.sub <- x.sub[names(x.start)] ## subset read with TSO
+  rm(x.start)
+  
+  ##set mis-match as 3
+  tmp <- data.frame(length = width(x.sub),
+                    category = "with_TSO")
+  
+  y_length_df <- rbind(tmp, y_length_df)
+  
+  print(paste(i, 'find polyA ========================='))
+  #find polyA tails
+  x.polyA <- x.sub[vcountPattern("AAAAAAAAAAGTACTCTGCGTTGATACCACTGCTT", x.sub, max.mismatch = 3) > 0]
+  
+  rm(x.sub)
+
+  tmp <- data.frame(length = width(x.polyA),
+                    category = "with_polyA")
+  y_length_df <- rbind(tmp, y_length_df)
+  y_length_df$category <- factor(y_length_df$category, levels = c("demultiplexed", "with_TSO", "with_polyA"))
+  
+  big_plot <- rbind(big_plot, y_length_df)
+  rm(x.polyA)
+}
+```
+
+
+
+
+```{r}
+  QC_plot.ls[[i]] <- ggplot(y_length_df, aes(x = length, fill = category)) + 
+  geom_histogram(bins = 70, alpha = 0.7, position="identity") + 
+    scale_x_continuous(limits = c(0, 5000), breaks = seq(0, 5000, 500)) +
+    ggtitle(paste("Read Length Distribution of", strsplit(i, "\\.")[[1]][1], "FLT-seq data")) +
+    xlab("length (bp)") + 
+    ylab("nCount") + 
+    theme_bw() + 
+    scale_fill_manual(values = c("grey80", "grey70", "grey40")) +
+    theme(axis.text = element_text(size = 10), 
+          axis.title = element_text(size = 15))
+
+saveRDS(QC_plot.ls, "/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/FLTseq_data/QC_plot.rds")
+```
+
+
+
+```{r}
+library(ggplot2)
+qcplot <- readRDS("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/FLTseq_data/QC_plot.rds")
+
+big_plot <- data.frame()
+samples <- names(qcplot)
+for (i in samples) {
+  x <- qcplot[[i]]
+  x <- x$data
+  big_plot <- rbind(big_plot, x)
+}
+
+ggplot(big_plot, aes(x = length, fill = category)) + 
+  geom_histogram(bins = 70, alpha = 0.7, position="identity") + 
+    scale_x_continuous(limits = c(0, 5000), breaks = seq(0, 5000, 500)) +
+    ggtitle(paste("Read Length Distribution of", strsplit(i, "\\.")[[1]][1], "FLT-seq data")) +
+    xlab("length (bp)") + 
+    ylab("nCount") + 
+    theme_bw() + 
+    scale_fill_manual(values = c("grey80", "grey70", "grey40")) +
+    theme(axis.text = element_text(size = 10), 
+          axis.title = element_text(size = 15))
+ggsave("address_comments_fig/scFLTseq_all_samples_loss_during_QC1.pdf", width = 6.5, height = 5)
+```
+
+```{r}
+plot_df <- data.frame(ratio = c(1 - 0.4079831, 0.4079831),
+                      category = c("loss", "pass_QC#1"))
+
+ggplot(plot_df, aes(x = 1, y = ratio, fill = category)) + 
+  geom_col(width = 0.5) + 
+  coord_polar(theta = "y") + 
+  theme(
+      panel.background = element_blank(),
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+    ) +
+  ggtitle("scFLT-seq read loss after QC #1")
+ggsave("address_comments_fig/scFLTseq_after_qc1.pdf", width = 5.5, height = 5)
+```
+
+##capture background 
+
+```{r}
+fq <- list.files("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/filtered_polyA/flames_out/")
+fq <- fq[grep("realign2transcript.bam$", fq)]
+
+fsm <- read.csv("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/isoform_FSM_annotation.csv")
+fsm$category <- "background"
+fsm$category[fsm$gene_id %in% c("ENSG00000115524.16", "ENSG00000010671.15")] <- "target"
+target_gene <- fsm$transcript_id[fsm$category == "target"]
+
+
+#read in BAM files
+library(Rsamtools)
+
+mapping_read_df <- data.frame()
+for (i in fq) {
+  bam <- BamFile(paste0("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/", i))
+  bam <- scanBam(bam)
+  mapping_region <- data.frame(read_name = bam[[1]]$qname, 
+                               mapping = bam[[1]]$rname)
+  mapping_region <- mapping_region[!duplicated(mapping_region$read_name), ]
+  
+  mapping_region$category <- "background"
+  mapping_region$category[mapping_region$mapping %in% target_gene] <- "target"
+  
+  tmp <- table(mapping_region$category) %>% as.data.frame()
+  colnames(tmp) <- c("mapping", "count")
+  tmp$patient <- strsplit(i, "_")[[1]][1]
+  mapping_read_df <- rbind(mapping_read_df, tmp)
+}
+
+plot_df <- mapping_read_df %>% group_by(mapping) %>% summarise(count = sum(count))
+plot_df <- as.data.frame(plot_df)
+plot_df$ratio <- plot_df$count / sum(plot_df$count)
+plot_df$mapping <- factor(plot_df$mapping, levels = c("target", "background"))
+
+ggplot(plot_df, aes(x = 1, y = ratio, fill = mapping)) + 
+  geom_col(width = 0.5) + 
+  coord_polar(theta = "y") + 
+  theme(
+      panel.background = element_blank(),
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+    ) +
+  ggtitle("scRaCH-seq, on-target and off-target reads")
+ggsave("address_comments_fig/scRaCHseq_on_off_target.pdf", width = 5.5, height = 5)
+```
+
+```{r}
+x <- read.csv("address_comments_fig/probe_select.csv")
+x <- x$Seq
+length(x) #116 probes
+
+library(Biostrings)
+probe_seq <- DNAStringSet(x = x)
+rev_probe_seq <- reverseComplement(probe_seq)
+
+names(rev_probe_seq) <- paste("rev_probe_seq", 1:length(rev_probe_seq), sep = "_")
+writeXStringSet(rev_probe_seq, "address_comments_fig/rev_probe_seq.fasta")
+```
+
+#AML data rach-seq and sr-seq correlation
+```{r, fig.width=6, fig.height=5}
+short_read_aggregate <- read.table("address_comments_fig/shortread_UMIs_per_gene.csv", header = T, sep = ",")
+rachseq_read_aggregate <- read.table("address_comments_fig/RACHseq_UMIs_per_gene.csv", header = T, sep = ",")
+
+all_count <- as.data.frame(cbind(short_read_count = short_read_aggregate$umi_count_all, rachseq_count = rachseq_read_aggregate$umi_count_all))
+
+rownames(all_count) <- short_read_aggregate$X
+
+
+ggplot(all_count, aes(x = rachseq_count, y = short_read_count)) +
+  geom_point() +
+  geom_text(aes(label = rownames(all_count)), size = 3, hjust = -0.2, vjust = 0.5) +
+   theme_bw() + 
+  scale_y_log10() + 
+  scale_x_log10() + 
+  labs(title = "Per gene count in scRaCH-seq and Short read", 
+       x = "scRaCHseq-UMIs (log10)", 
+       y = "scRNA-seq-read  (log10)") 
+
+ggsave("address_comments_fig/aml_corr.pdf", width = 6, height = 5)
+```
+
+#Find the distribution of expression levels
+Here we try to estimate the expression level of SF3B1 and BTK among those of all genes.
+##Check CLL2-RB scFLT-seq data
+```{r, fig.width=6, fig.height=4}
+# I will use the CLL2-RB as an example
+# load in scFLT-seq data
+x <- read.csv("/stornext/Genomics/data/CLL_venetoclax/FLTseq/cll141/cll141_isoform_outs/transcript_count.csv.gz")
+
+#library(biomaRt)
+#give symbol to genes
+#mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+#genes <- x$gene_id
+#genes <- sapply(strsplit(genes, "\\."), function(x){x[1]})
+#G_list <- getBM(filters= "ensembl_gene_id", attributes= c("ensembl_gene_id", "hgnc_symbol", "description"), values = genes, mart = mart)
+
+x$transcript_id <- NULL
+y <- x %>% group_by(gene_id) %>% summarise_all(sum)
+z <- as.data.frame(y)
+rownames(z) <- z$gene_id
+z$gene_id <- NULL
+df <- data.frame(gene_id = rownames(z),
+                 UMIs = rowSums(z),
+                 per_cell_UMIs = rowSums(z) / ncol(z))
+
+target <- df[df$gene_id %in% c("ENSG00000115524.16", "ENSG00000010671.15"),]
+
+
+ggplot(df, aes(x=per_cell_UMIs)) + 
+  geom_histogram(binwidth = 0.02) +
+  xlim(c(0,3)) +
+  theme_bw() + 
+  geom_vline(xintercept = target$per_cell_UMIs[1], colour = "red", linetype = "dashed") +
+  geom_vline(xintercept = target$per_cell_UMIs[2], colour = "red", linetype = "dashed") + 
+  ggtitle("Average gene expression across the whole population")
+ggsave("~/distr_average_gene_expression.pdf", width = 6, height = 4)
+```
+
+
+
+```{r}
+target <- df[df$gene_id %in% c("ENSG00000115524.16", "ENSG00000010671.15"),]
+
+
+ggplot(df, aes(x=per_cell_UMIs)) + 
+  geom_histogram(binwidth = 0.02) +
+  xlim(c(0,3)) +
+  theme_bw() + 
+  geom_vline(xintercept = target$per_cell_UMIs[1], colour = "red", linetype = "dashed") +
+  geom_vline(xintercept = target$per_cell_UMIs[2], colour = "red", linetype = "dashed") + 
+  ggtitle("Average gene expression across the whole population")
+ggsave("~/distr_average_gene_expression.pdf", width = 6, height = 4)
+```
+
+```{r}
+df <- df[order(df$per_cell_UMIs, decreasing = T), ]
+df$rank <- 1:nrow(df)
+target <- df[df$gene_id %in% c("ENSG00000115524.16", "ENSG00000010671.15"),]
+target
+```
+
+##Check CLL2-RB bulk RNA-seq data
+```{r}
+library(edgeR)
+x <- readRDS("public_home/Rachel/total_RNA_seq/total_RNAseq_7patients.rds")
+
+#we sort the CLL cells and non-tumour cells
+#so the data will be different from scFLT-seq
+#fist look at CLL cells
+y <- as.data.frame(x$counts)
+df <- data.frame(gene = x$genes,
+                 counts = y$CLL141.tumour)
+df <- df[df$counts != 0, ]
+df$freq <- df$counts / sum(df$counts)
+target <- df[df$gene.GeneID %in% c("SF3B1", "BTK"),]
+
+ggplot(df, aes(x = log2(counts))) +
+  geom_histogram(bins = 100) +
+  #xlim(c(0, 0.001)) +
+  ylab("Frequency") +
+  xlab("Log2 Counts") +
+  ggtitle("CLL2-RB CLL cells, bulk RNA-seq data") +
+  geom_vline(xintercept = log2(target$counts[1]), colour = "red", linetype = "dashed") +
+  geom_vline(xintercept = log2(target$counts[2]), colour = "red", linetype = "dashed") + 
+  theme_bw()
+ggsave("~/bulk_distr_logCounts.pdf", width = 6, height = 4)
+```
+
+
+```{r}
+df <- df[order(df$freq, decreasing = T), ]
+df$rank <- 1:nrow(df)
+target <- df[df$gene.GeneID %in% c("SF3B1", "BTK"),]
+log2(target$counts)
+```
+
+```{r}
+library(edgeR)
+x <- readRDS("public_home/Rachel/total_RNA_seq/total_RNAseq_7patients.rds")
+
+y <- cpm(x)
+y <- as.data.frame(y)
+df <- data.frame(gene = rownames(y),
+                 counts = y$CLL141.tumour)
+df <- df[df$counts != 0, ]
+#I add 1 to each gene for log-tranform
+df$logCPM <- log2(df$counts + 1)
+target <- df[df$gene %in% c("SF3B1", "BTK"),]
+
+ggplot(df, aes(x = logCPM)) +
+  geom_histogram(bins = 100) +
+  #xlim(c(0, 2)) +
+  ylab("Frequency") +
+  xlab("Log2 CPM") +
+  ggtitle("CLL2-RB CLL cells, bulk RNA-seq data") +
+  geom_vline(xintercept = target$logCPM[1], colour = "red", linetype = "dashed") +
+  geom_vline(xintercept = target$logCPM[2], colour = "red", linetype = "dashed") + 
+  theme_bw()
+ggsave("~/bulk_distr_log2CPM.pdf", width = 6, height = 4)
+```
+
+```{r}
+df <- df[order(df$logCPM, decreasing = T), ]
+df$rank <- 1:nrow(df)
+target <- df[df$gene %in% c("SF3B1", "BTK"),]
+target
+```
+
+##scRNA-seq
+```{r}
+library(DropletUtils)
+sce <- read10xCounts("/stornext/Genomics/data/CLL_venetoclax/workspace/T_under_VEN/Aim1/cr_output/CLL141i/filtered_feature_bc_matrix20/")
+sce <- sce[rowData(sce)$Type == "Gene Expression", ]
+x <- as.matrix(counts(sce)) # 33538  1875
+x <- x[rowSums(x > 0) > 1, ]
+
+df <- data.frame(gene = rownames(x), 
+                 UMIs = rowSums(x),
+                 UMIs_per_cell = rowSums(x) / ncol(x))
+
+target <- df[df$gene %in% c("ENSG00000115524", "ENSG00000010671"),]
+
+ggplot(df, aes(x = UMIs_per_cell)) + 
+  geom_histogram(binwidth = 0.02) +
+  xlim(c(0, 3)) +
+  ylim(c(0, 3000)) + 
+  ylab("Frequency") +
+  xlab("Average expression across all cells") +
+  ggtitle("CLL2-RB, scRNA-seq data") +
+  geom_vline(xintercept = target$UMIs_per_cell[1], colour = "red", linetype = "dashed") +
+  geom_vline(xintercept = target$UMIs_per_cell[2], colour = "red", linetype = "dashed") + 
+  theme_bw()
+ggsave("~/scRNAseq_distr_average_gene_expression.pdf", width = 6, height = 4)
+```
+
+```{r}
+df <- df[order(df$UMIs_per_cell, decreasing = T), ]
+df$rank <- 1:nrow(df)
+target <- df[df$gene %in% c("ENSG00000115524", "ENSG00000010671"),]
+target
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#end

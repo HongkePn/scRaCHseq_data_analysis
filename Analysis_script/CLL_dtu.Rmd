@@ -1,0 +1,859 @@
+---
+title: "CLL DTU"
+author: "Hongke Peng"
+date: "2023-12-28"
+output: html_document
+---
+
+```{r}
+library(Seurat)
+library(SingleCellExperiment)
+library(transPlotR)
+library(dittoSeq)
+library(msigdbr)
+```
+
+
+```{r,fig.width=5, fig.height=5}
+sr <- readRDS("make_srt_object/sr_data.rds")
+
+colset <- c("#A9A9A9", 
+            "#F055A3", "#A56AAC", "#D99ACE", "#DCBFDD", "#77B3DA", "#4CBBD5", "#A5D0F0", "#528DD9", "#7876B1B2","#4DBBD5B2","#00A1D5B2",
+            "#9BCA3C", "#91D1C2", "#5FB14E", "#CADB73", "#3B897C")
+  
+DimPlot(object = sr, reduction = "mnn_umap", order = F, group.by = "refined.cluster", 
+        cols = colset, raster = T, pt.size = 0.3,
+        label = T, label.box = T, label.color = "white", label.size = 3)
+```
+
+#Check BTK and SF3B1 expression
+
+```{r}
+sce <- readRDS("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/flames_out/sces.rds")
+
+library(scMerge)
+#Add prefix "CLLxxx_" to the cell barcodes
+#select cells that have sr data
+for (i in names(sce)) {
+  x <- sce[[i]]
+  colnames(x) <- paste(i, colnames(x), sep = "_")
+  colnames(x) <- paste(colnames(x), "1", sep = "-")
+  keep_cell <- colnames(x)[colnames(x) %in% colnames(sr)]
+  x <- x[, keep_cell]
+  #put the gene id to the start of the rowname
+  rownames(x) <- paste(rowData(x)$gene_id, rownames(x), sep = "_")
+  sce[[i]] <- x
+}
+#combining all sce
+combined.sce <- sce_cbind(sce_list = sce, 
+                  exprs = "counts", 
+                  method = "union", 
+                  cut_off_batch = 0, 
+                  cut_off_overall = 0)
+sr #146482
+combined.sce #146482
+
+sr <- sr[, colnames(sr) %in% colnames(combined.sce)]
+combined.sce <- combined.sce[, colnames(sr)]
+#all lr matrix to sr data
+sr[["tr"]] <- CreateAssayObject(counts = counts(combined.sce))
+#saveRDS(sr, "Make_srt_step2_fig/sr_data.rds")
+```
+
+#make CLL/B cell cluster
+```{r}
+#select only b and CLL cluster
+b <- subset(sr, refined.cluster %in% 1:11)
+
+#b[["tr"]] <- NULL
+#b[["combined_tr"]] <- NULL
+
+
+#keep <- colnames(b)[colnames(b) %in% colnames(combined.sce)]
+#b <- b[, keep]
+
+#b.sce <- combined.sce[, keep]
+#all lr matrix to sr data
+#b[["tr"]] <- CreateAssayObject(counts = counts(b.sce))
+
+DefaultAssay(b) <- "RNA"
+b <- NormalizeData(b)
+b <- FindVariableFeatures(b, nfeatures = 3000)
+b <- ScaleData(b)
+
+#load package
+library(Seurat)
+library(batchelor)
+library(BiocNeighbors)
+library(BiocSingular)
+library(BiocParallel)
+bpp=MulticoreParam(3)
+
+hvg <- VariableFeatures(b)
+
+correction.order=list(list("CLL156","CLL5309","CLL5602","CLL5305","CLL5306","CLL108"),#screening
+                      list("CLL141v","CLL141i","CLL153","CLL63i","CLL63v","CLL232","CLL152","CLL318","CLL155","CLL170i", "CLL170v", "CLL175"),#VEN relapsed
+                      list("HD11","HD12","HD14") #HD samples
+)
+
+set.seed(2022)
+print("start run mnn -----------------------------")
+corr.f=fastMNN(b@assays$RNA@data,
+               batch=factor(b$orig.ident),
+               k=30,
+               d=50,
+               deferred=T,
+               auto.merge=T,
+               merge.order = correction.order, 
+               subset.row=hvg,
+               BSPARAM=RandomParam(),
+               BPPARAM=bpp)
+
+#saveRDS(corr.f,"/stornext/Genomics/data/CLL_venetoclax/workspace/SF3B1_mutation/analysis/Make_srt_step2_fig/mnn.rds")
+
+#add MNN corrected pca to sr
+mnn_pca <- reducedDim(corr.f, "corrected")
+colnames(mnn_pca) <- paste("PCA", 1:50, sep = "_")
+b[["mnn_pca"]] <- Seurat::CreateDimReducObject(embeddings = mnn_pca)
+```
+
+```{r, fig.width=11, fig.height=5}
+dims.to.use <- 50
+b <- RunUMAP(b ,reduction = "mnn_pca", dims=1:dims.to.use, reduction.name = "mnn_umap", reduction.key = "mnn_umap_")
+b <- FindNeighbors(b, reduction = "mnn_pca", dims = 1:dims.to.use, graph.name = "mnn")
+b <- FindClusters(b, graph.name = "mnn", resolution = 1.2)
+
+#only 2 cells in cluster 13, remove them
+b <- subset(b, seurat_clusters %in% 0:12)
+
+colset <- c("#A9A9A9", 
+            "#F055A3", "#A56AAC", "#D99ACE", "#DCBFDD", "#77B3DA", "#A5D0F0", "#528DD9", "#7876B1B2","#00A1D5B2",
+            "#9BCA3C", "#91D1C2", "#4CBBD5","#4DBBD5B2","#5FB14E", "#CADB73", "#3B897C")
+  
+p1 <- DimPlot(object = b, reduction = "mnn_umap", order = F, group.by = "seurat_clusters", 
+        cols = colset, raster = T, pt.size = 1,
+        label = T, label.box = T, label.color = "white", label.size = 5)
+
+
+                      list("CLL141v","CLL141i","CLL153","CLL63i","CLL63v","CLL232","CLL152","CLL318","CLL155","CLL170i", "CLL170v", "CLL175")#VEN relapsed
+                      list #HD samples
+
+b$stage <- "R"
+b$stage[b$orig.ident %in% c("CLL156","CLL5309","CLL5602","CLL5305","CLL5306","CLL108")] <- "S"
+b$stage[b$orig.ident %in% c("CLL141i", "CLL63i", "CLL170i")] <- "RB"
+b$stage[b$orig.ident %in% c("HD11","HD12","HD14")] <- "HD"
+b$stage <- factor(b$stage, levels = c("S", "R", "RB", "HD"))
+
+p2 <- DimPlot(object = b, reduction = "mnn_umap", order = F, group.by = "stage", 
+        cols = c("#96CA00", "#DF89FF", "#00DAE0", "#99C9FF"), raster = T, pt.size = 1,
+        label = F)
+
+p <- p1 + p2
+p
+ggsave(plot = p, filename = "cll_dtu_fig/CLL_cluster.pdf", width = 11, height = 5)
+```
+
+
+```{r, fig.width=15, fig.height=5}
+DimPlot(object = b, reduction = "mnn_umap", order = F, split.by = "stage",
+        cols = colset, raster = T, pt.size = 0.7,
+        label = F)
+ggsave("cll_dtu_fig/umap_split_by_stage.pdf", width = 15, height = 5)
+```
+
+
+```{r}
+DefaultAssay(b) <- "tr"
+anno_df <- data.frame(rownames = rownames(b))
+anno_df$gene_id <- sapply(strsplit(anno_df$rownames, "-"), function(x){x[1]})
+anno_df$tr_name <- sapply(strsplit(anno_df$rownames, "-"), function(x){paste(x[2:length(x)], collapse = "-")})
+
+select_row <- anno_df$rownames[anno_df$gene_id %in% c("ENSG00000115524.16", "ENSG00000010671.15")]
+mtx <- GetAssayData(b)
+mtx <- mtx[select_row, ]
+b[["target"]] <- CreateAssayObject(counts = mtx)
+
+anno_df <- data.frame(rownames = rownames(mtx))
+anno_df$gene_id <- sapply(strsplit(anno_df$rownames, "-"), function(x){x[1]})
+anno_df$tr_name <- sapply(strsplit(anno_df$rownames, "-"), function(x){paste(x[2:length(x)], collapse = "-")})
+saveRDS(b, "cll_dtu_fig/cll_b.rds")
+```
+
+
+
+#BTK isoform
+##make heatmap
+```{r, fig.width=8, fig.height=3}
+DefaultAssay(b) <- "target"
+b <- NormalizeData(b)
+b <- ScaleData(b)
+
+mtx <- GetAssayData(b, slot = "count")
+
+#count how many cells that we capture the BTK isform
+
+anno_df <- data.frame(rownames = rownames(mtx))
+anno_df$gene_id <- sapply(strsplit(anno_df$rownames, "-"), function(x){x[1]})
+anno_df$tr_name <- sapply(strsplit(anno_df$rownames, "-"), function(x){paste(x[2:length(x)], collapse = "-")})
+
+##select only the SF3B1 isoform
+mtx <- mtx[grep("ENSG00000010671.15", rownames(mtx)), ]
+
+df <- data.frame(bc = names(colSums(mtx)), 
+                 count = colSums(mtx))
+df$sample <- sapply(strsplit(df$bc, "_"), function(x){x[1]})
+df$category <- "RaCHseq"
+
+sr_mtx <- GetAssayData(b, assay = "RNA", slot = "count")
+tmp <- data.frame(bc = names(colSums(sr_mtx)),
+                  count = sr_mtx["BTK", ])
+tmp$sample <- sapply(strsplit(tmp$bc, "_"), function(x){x[1]})
+tmp$category <- "scRNA"
+
+
+plot_df <- rbind(df, tmp)
+plot_df$category <- factor(plot_df$category, levels = c("scRNA", "RaCHseq"))
+
+ggplot(plot_df, aes(x = count, fill = category)) + 
+  geom_histogram(binwidth = 1, position = "identity", alpha = 0.5) + 
+  xlim(c(0, 100)) + 
+  ylim(c(0,30000)) +
+  xlab("BTK UMIs") + 
+  ylab("Cell numbers") +
+  theme_bw() + 
+  scale_fill_manual(values = c("grey30", "orange")) + 
+  geom_vline(xintercept = 5, linetype = "dashed")
+ggsave("cll_dtu_fig/barplot_btk_umis.pdf", width = 8, height = 3)
+rm(plot_df)
+rm(tmp)
+```
+
+```{r}
+df$filtering <- "rm"
+df$filtering[df$count >= 5] <- "keep"
+table(df$filtering, df$sample)
+```
+
+
+```{r, fig.width=8, fig.height=3}
+#try to rm cell with less than 5 reads
+df <- df[df$count >= 5, ]
+table(df$sample)
+
+#subset b object
+b <- b[, df$bc]
+
+mtx <- GetAssayData(b, slot = "count")
+
+btk_mtx <- t(mtx[anno_df$rownames[anno_df$gene_id == "ENSG00000010671.15"], ])
+colnames(btk_mtx) <- sapply(strsplit(colnames(btk_mtx), "-"), function(x){paste(x[2:length(x)], collapse = "_")})
+btk_mtx <- as.data.frame(btk_mtx)
+btk_mtx$sample <- sapply(strsplit(rownames(btk_mtx), "_"), function(x){x[1]})
+
+pt_table <- read.csv("sf3b1_in_t_fig/patient_number.csv", header = F)
+colnames(pt_table) <- c("sample", "alias")
+btk_mtx$alias <- pt_table$alias[match(btk_mtx$sample, pt_table$sample)]
+btk_mtx$sample <- btk_mtx$alias
+btk_mtx$alias <- NULL
+
+btk_mtx <- btk_mtx %>% group_by(sample) %>% summarise_all(mean)
+btk_mtx <- as.data.frame(btk_mtx)
+rownames(btk_mtx) <- btk_mtx$sample
+btk_mtx$sample <- NULL
+
+btk_mtx <- t(btk_mtx)
+btk_mtx <- as.data.frame(btk_mtx)
+
+top_tr <- 5
+names(sort(rowSums(btk_mtx), decreasing = T))[1:top_tr]
+plot_df <- btk_mtx[names(sort(rowSums(btk_mtx), decreasing = T))[1:top_tr], ]
+plot_df <- scale(plot_df, center = F)
+
+#btk_mtx <- scale(btk_mtx, center = F)
+#btk_mtx[btk_mtx < -3] <- -3
+#btk_mtx[btk_mtx > 3] <- 3
+
+anno_df <- data.frame(sample = colnames(plot_df))
+rownames(anno_df) <- anno_df$sample
+
+anno_df$stage <- "VEN-R"
+anno_df$stage[anno_df$sample %in% c("CLL3-S","CLL26-S","CLL6-S","CLL7-S","CLL16-S","CLL23-S")] <- "S"
+anno_df$stage[anno_df$sample %in% c("HD11", "HD12", "HD14")] <- "HD"
+anno_df$stage[anno_df$sample %in% c("CLL2-RB", "CLL5-RB", "CLL23-RB")] <- "VEN-RB"
+anno_df$stage <- factor(anno_df$stage, levels = c("S", "VEN-R", "VEN-RB", "HD"))
+anno_df$sample <- NULL
+
+#anno_df$group <- "WT"
+#anno_df$group[anno_df$sample %in% c("CLL156", "CLL153", "CLL5306", "CLL155", "CLL318")] <- "SF3B1_mut"
+#anno_df$group <- factor(anno_df$group, levels = c("SF3B1_mut", "WT"))
+
+#alias_order <- df$alias[order(df$nCell, decreasing = T)]
+#alias_order_adj <- alias_order[c(1:4, 6:16, 18:20, 17, 5, 21) ]
+alias_order_adj <- c("CLL3-S","CLL26-S","CLL6-S","CLL7-S","CLL16-S","CLL23-S",
+                     "CLL3-R", "CLL26-R", "CLL2-R", "CLL5-R", "CLL6-R", "CLL7-R", "CLL16-R", "CLL17-R", "CLL23-R", 
+                     "CLL2-RB", "CLL5-RB", "CLL23-RB", 
+                     "HD11", "HD12", "HD14")
+
+ht_data <- pheatmap::pheatmap(plot_df[, alias_order_adj], cluster_cols = F, annotation_col = anno_df, treeheight_row = 0, gaps_col = c(6, 15, 18),
+                   filename = "cll_dtu_fig/btk_hm.pdf",
+                   width = 8, height = 3)
+```
+
+##plot exon
+```{r, fig.width=8, fig.height=8}
+detection <- rtracklayer::readGFF("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_fastq/flames_out/isoform_annotated.gff3", version = 3)
+detection <- as.data.frame(detection)
+x <- 1:nrow(detection)
+interal <- x[!is.na(detection$gene_id)]
+for (i in 1:(length(interal) - 1)) {
+  j <- interal[i]
+  k <- interal[i+1] - 1
+  detection$gene_id[j:k] <- detection$gene_id[j]
+}
+detection$gene_id[(k + 1) : nrow(detection)] <- detection$gene_id[(k + 1)]
+
+detection <- detection[detection$type == "exon", ]
+detection$transcript_id <-sapply(strsplit(as.character(detection$Parent), ":"), function(x){x[2]})
+
+detection$seqnames <- detection$seqid
+detection$width <- abs(detection$start - detection$end) + 1
+
+#give symbol to genes
+detection$ensembl <- sapply(strsplit(detection$gene_id, "\\."), function(x){x[1]})
+genes <- unique(detection$ensembl)
+
+library(biomaRt)
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+G_list <- getBM(filters= "ensembl_gene_id", attributes= c("ensembl_gene_id", "hgnc_symbol", "description"), values = genes, mart = mart)
+
+
+x <- merge(detection, G_list, by.x = "ensembl", by.y = "ensembl_gene_id", all.x = T)
+x$gene_name <- x$hgnc_symbol
+
+select_tr <- plot_df[ht_data$tree_row[["order"]], ] %>% rownames()
+
+plot_tr <- data.frame()
+
+for (i in select_tr) {
+  plot_tr <- rbind(plot_tr, x[x$transcript_id == i, ])
+}
+
+trancriptVis(gtfFile = plot_tr,
+             gene = c("BTK"), 
+             exonWidth = 1,
+             #text.pos = "right", 
+             addNormalArrow = F,
+             facetByGene = F,
+             relTextDist = 0.5,
+             textLabelSize = 3.5,
+             marginX = 1) + 
+  ggtitle("BTK FLAMES detected Annotation")
+ggsave(plot = p, filename = "cll_dtu_fig/btk_exon.pdf", width = 8, height = 8)
+```
+
+
+#SF3B1 isoform
+##make heatmap
+```{r, fig.width=8, fig.height=3}
+#b <- readRDS("cll_dtu_fig/b_cll.rds")
+
+DefaultAssay(b) <- "target"
+b <- NormalizeData(b)
+b <- ScaleData(b)
+
+mtx <- GetAssayData(b, slot = "count")
+
+#count how many cells that we capture the BTK isform
+
+anno_df <- data.frame(rownames = rownames(mtx))
+anno_df$gene_id <- sapply(strsplit(anno_df$rownames, "-"), function(x){x[1]})
+anno_df$tr_name <- sapply(strsplit(anno_df$rownames, "-"), function(x){paste(x[2:length(x)], collapse = "-")})
+
+##select only the SF3B1 isoform
+mtx <- mtx[grep("ENSG00000115524.16", rownames(mtx)), ]
+
+df <- data.frame(bc = names(colSums(mtx)), 
+                 count = colSums(mtx))
+df$sample <- sapply(strsplit(df$bc, "_"), function(x){x[1]})
+df$category <- "RaCHseq"
+
+sr_mtx <- GetAssayData(b, assay = "RNA", slot = "count")
+tmp <- data.frame(bc = names(colSums(sr_mtx)),
+                  count = sr_mtx["SF3B1", ])
+tmp$sample <- sapply(strsplit(tmp$bc, "_"), function(x){x[1]})
+tmp$category <- "scRNAseq"
+
+plot_df <- rbind(df, tmp)
+plot_df$category <- factor(plot_df$category, levels = c("scRNAseq", "RaCHseq"))
+
+ggplot(plot_df, aes(x = count, fill = category)) + 
+  geom_histogram(binwidth = 1, position = "identity", alpha = 0.5) + 
+  xlim(c(0, 100)) + 
+  ylim(c(0,35000)) +
+  xlab("SF3B1 UMIs") + 
+  ylab("Cell numbers") +
+  theme_bw() + 
+  scale_fill_manual(values = c("grey30", "orange")) + 
+  geom_vline(xintercept = 5, linetype = "dashed")
+ggsave("cll_dtu_fig/barplot_sf3b1_umi.pdf", width = 8, height = 3)
+```
+
+```{r}
+df$filtering <- "rm"
+df$filtering[df$count >= 5] <- "keep"
+table(df$filtering, df$sample)
+```
+
+
+
+```{r, fig.width=8, fig.height=3}
+#try to rm cell with less than 5 reads
+df <- df[df$count >= 5, ]
+table(df$sample)
+
+
+b <- b[, df$bc]
+
+mtx <- GetAssayData(b, slot = "count")
+
+btk_mtx <- t(as.matrix(mtx[anno_df$rownames[anno_df$gene_id == "ENSG00000115524.16"], ]))
+colnames(btk_mtx) <- sapply(strsplit(colnames(btk_mtx), "-"), function(x){paste(x[2:length(x)], collapse = "_")})
+btk_mtx <- as.data.frame(btk_mtx)
+btk_mtx$sample <- sapply(strsplit(rownames(btk_mtx), "_"), function(x){x[1]})
+
+pt_table <- read.csv("sf3b1_in_t_fig/patient_number.csv", header = F)
+colnames(pt_table) <- c("sample", "alias")
+btk_mtx$alias <- pt_table$alias[match(btk_mtx$sample, pt_table$sample)]
+btk_mtx$sample <- btk_mtx$alias
+btk_mtx$alias <- NULL
+
+btk_mtx <- btk_mtx %>% group_by(sample) %>% summarise_all(mean)
+btk_mtx <- as.data.frame(btk_mtx)
+rownames(btk_mtx) <- btk_mtx$sample
+btk_mtx$sample <- NULL
+
+btk_mtx <- t(btk_mtx)
+btk_mtx <- as.data.frame(btk_mtx)
+
+#rm the artefacts in isoform
+btk_mtx <- btk_mtx[!grepl("197405126", rownames(btk_mtx)), ]
+#btk_mtx <- btk_mtx[!grepl("197391980_197398772_1", rownames(btk_mtx)), ]
+
+top_tr <- 5
+names(sort(rowSums(btk_mtx)/21, decreasing = T))[1:top_tr]
+plot_df <- btk_mtx[names(sort(rowSums(btk_mtx), decreasing = T))[1:top_tr], ]
+plot_df <- scale(plot_df, center = F)
+
+fsm <- read.csv("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/re_basecall/rachseq/fastq_polyA/filtered_fastq/flames_out/isoform_FSM_annotation.csv")
+
+anno_df <- data.frame(sample = colnames(plot_df))
+rownames(anno_df) <- anno_df$sample
+
+anno_df$stage <- "VEN-R"
+anno_df$stage[anno_df$sample %in% c("CLL3-S","CLL26-S","CLL6-S","CLL7-S","CLL16-S","CLL23-S")] <- "S"
+anno_df$stage[anno_df$sample %in% c("HD11", "HD12", "HD14")] <- "HD"
+anno_df$stage[anno_df$sample %in% c("CLL2-RB", "CLL5-RB", "CLL23-RB")] <- "VEN-RB"
+anno_df$stage <- factor(anno_df$stage, levels = c("S", "VEN-R", "VEN-RB", "HD"))
+anno_df$sample <- NULL
+
+#anno_df$group <- "WT"
+#anno_df$group[anno_df$sample %in% c("CLL156", "CLL153", "CLL5306", "CLL155", "CLL318")] <- "SF3B1_mut"
+#anno_df$group <- factor(anno_df$group, levels = c("SF3B1_mut", "WT"))
+
+#alias_order <- df$alias[order(df$nCell, decreasing = T)]
+#alias_order_adj <- alias_order[c(1:4, 6:16, 18:20, 17, 5, 21) ]
+alias_order_adj <- c("CLL3-S","CLL26-S","CLL6-S","CLL7-S","CLL16-S","CLL23-S",
+                     "CLL3-R", "CLL26-R", "CLL2-R", "CLL5-R", "CLL6-R", "CLL7-R", "CLL16-R", "CLL17-R", "CLL23-R", 
+                     "CLL2-RB", "CLL5-RB", "CLL23-RB", 
+                     "HD11", "HD12", "HD14")
+
+ht_data <- pheatmap::pheatmap(plot_df[, alias_order_adj], cluster_cols = F, annotation_col = anno_df, treeheight_row = 0, gaps_col = c(6, 15, 18), cluster_rows = T,
+                   #filename = "cll_dtu_fig/sf3b1_hm.pdf",
+                   width = 8, height = 3)
+pheatmap::pheatmap(plot_df[, alias_order_adj], cluster_cols = F, annotation_col = anno_df, treeheight_row = 0, gaps_col = c(6, 15, 18), cluster_rows = F,
+                   filename = "cll_dtu_fig/sf3b1_hm.pdf",
+                   width = 8, height = 3)
+```
+
+
+##plot exon
+```{r, fig.width=8, fig.height=8}
+detection <- rtracklayer::readGFF("/stornext/Genomics/data/CLL_venetoclax/RaCHseq_paper/filtered_polyA/flames_out/isoform_annotated.gff3", version = 3)
+detection <- as.data.frame(detection)
+x <- 1:nrow(detection)
+interal <- x[!is.na(detection$gene_id)]
+for (i in 1:(length(interal) - 1)) {
+  j <- interal[i]
+  k <- interal[i+1] - 1
+  detection$gene_id[j:k] <- detection$gene_id[j]
+}
+detection$gene_id[(k + 1) : nrow(detection)] <- detection$gene_id[(k + 1)]
+
+detection <- detection[detection$type == "exon", ]
+detection$transcript_id <-sapply(strsplit(as.character(detection$Parent), ":"), function(x){x[2]})
+
+detection$seqnames <- detection$seqid
+detection$width <- abs(detection$start - detection$end) + 1
+
+#give symbol to genes
+detection$ensembl <- sapply(strsplit(detection$gene_id, "\\."), function(x){x[1]})
+genes <- unique(detection$ensembl)
+
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+G_list <- getBM(filters= "ensembl_gene_id", attributes= c("ensembl_gene_id", "hgnc_symbol", "description"), values = genes, mart = mart)
+
+
+x <- merge(detection, G_list, by.x = "ensembl", by.y = "ensembl_gene_id", all.x = T)
+x$gene_name <- x$hgnc_symbol
+
+select_tr <- plot_df[ht_data$tree_row[["order"]], ] %>% rownames()
+select_tr[5] <- "ENSG00000115524.16_197391980_197435029_1"
+
+plot_tr <- data.frame()
+
+for (i in select_tr) {
+  plot_tr <- rbind(plot_tr, x[x$transcript_id == i, ])
+  
+}
+
+p <- trancriptVis(gtfFile = plot_tr,
+             gene = c("SF3B1"), 
+             exonWidth = 1,
+             #text.pos = "right", 
+             addNormalArrow = F,
+             facetByGene = F,
+             relTextDist = 0.5,
+             textLabelSize = 3.5,
+             marginX = 1) + 
+  ggtitle("SF3B1 FLAMES detected Annotation")
+p
+ggsave(plot = p, filename = "cll_dtu_fig/sf3b1_exon.pdf", width = 8, height = 8)
+```
+
+```{r, fig.width=8, fig.height=4}
+DefaultAssay(b) <- "tr"
+b <- NormalizeData(b, normalization.method = "CLR")
+b <- ScaleData(b)
+VlnPlot(b, features = c("ENSG00000115524.16-ENSG00000115524.16-197405126-197435029-1","ENSG00000115524.16-ENST00000487698.5"), pt.size = 0, slot = "scale.data", assay = "tr", cols = dittoColors(), ncol = 1) + NoLegend()
+ggsave("sf3b1_btk_step3_fig/sf3b1_vln.pdf", width = 8, height = 4)
+```
+
+```{r, fig.width=5, fig.height=5}
+DefaultAssay(b) <- "target"
+b <- NormalizeData(b, normalization.method = "CLR")
+b <- ScaleData(b)
+
+FeaturePlot(b, reduction = "mnn_umap", features = c("ENSG00000115524.16-ENST00000487698.5"), min.cutoff = "q2",max.cutoff = "q98", order = T, cols = c("lightgrey", "grey30"), pt.size = 0.5, raster = F)
+ggsave("cll_dtu_fig/short_sf3b1_isoform.pdf", width = 5, height = 5)
+```
+
+```{r, fig.width=5, fig.height=5}
+FeaturePlot(b, reduction = "mnn_umap", features = c("ENSG00000115524.16-ENST00000335508.10"), min.cutoff = "q2",max.cutoff = "q98", order = T, cols = c("lightgrey", "grey30"), pt.size = 0.5, raster = F)
+ggsave("cll_dtu_fig/primary_sf3b1_isoform.pdf", width = 5, height = 5)
+```
+
+
+```{r}
+VlnPlot(b, features = "percent.mt", pt.size = 0, slot = "scale.data", cols = colset)
+```
+
+
+#DE analysis
+
+```{r}
+x <- subset(b, seurat_clusters %in% c(1, 3, 4, 12))
+markers <- FindAllMarkers(x, assay = "RNA", test.use = "MAST")
+write.csv(markers, "cll_dtu_fig/marker_gene_of_screening_clusters.csv")
+x <- read.csv("cll_dtu_fig/marker_gene_of_screening_clusters.csv")
+```
+
+```{r, fig.width=10, fig.height=3}
+df <- markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DotPlot(x,assay="RNA", cols="RdBu", features=df$gene, cluster.idents=T, group.by = "seurat_clusters") + 
+  theme(axis.text.x=element_text(size=10, angle = 45, hjust = 1)) + 
+  xlab(NULL) +ylab(NULL) + 
+  ggtitle("Marker genes")
+```
+
+```{r, fig.width=10, fig.height=3}
+filtered_m <- markers[!grepl("^MT-", markers$gene), ]
+df <- filtered_m %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DotPlot(x,assay="RNA", cols="RdBu", features=df$gene, cluster.idents=T, group.by = "seurat_clusters") + 
+  theme(axis.text.x=element_text(size=10, angle = 45, hjust = 1)) + 
+  xlab(NULL) +ylab(NULL) + 
+  ggtitle("Marker genes")
+```
+
+```{r, fig.width=10, fig.height=3}
+filtered_m <- markers[!grepl("^MT-", markers$gene), ]
+df <- filtered_m %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DotPlot(x,assay="RNA", cols=c("grey90", "#E54924"), features=df$gene, cluster.idents=T, group.by = "seurat_clusters") + 
+  theme(axis.text.x=element_text(size=10, angle = 45, hjust = 1)) + 
+  xlab(NULL) +ylab(NULL) + 
+  ggtitle("Marker genes")
+ggsave("cll_dtu_fig/dotplot_rm_mtgene.pdf", width = 10, height = 3)
+```
+
+
+#SF3B1 isoforms in T cells
+```{r}
+t <- subset(sr, refined.cluster %in% 12:16)
+table(t$orig.ident)
+```
+
+
+#make t cluster
+```{r, fig.width=6, fig.height=5}
+#select only b and CLL cluster
+DefaultAssay(t) <- "RNA"
+t <- NormalizeData(t)
+t <- FindVariableFeatures(t, nfeatures = 2000)
+t <- ScaleData(t)
+
+#run MNN
+#load package
+library(Seurat)
+library(batchelor)
+library(BiocNeighbors)
+library(BiocSingular)
+library(BiocParallel)
+bpp=MulticoreParam(3)
+
+hvg <- VariableFeatures(t)
+
+correction.order=list(list("CLL156","CLL5309","CLL5602","CLL5305","CLL5306","CLL108"),#screening
+                      list("CLL141v","CLL141i","CLL153","CLL63i","CLL63v","CLL232","CLL152","CLL318","CLL155","CLL170i", "CLL170v", "CLL175"),#VEN relapsed
+                      list("HD11","HD12","HD14") #HD samples
+)
+
+set.seed(2022)
+print("start run mnn -----------------------------")
+corr.f=fastMNN(t@assays$RNA@data,
+               batch=factor(t$orig.ident),
+               k=30,
+               d=50,
+               deferred=T,
+               auto.merge=T,
+               merge.order = correction.order, 
+               subset.row=hvg,
+               BSPARAM=RandomParam(),
+               BPPARAM=bpp)
+
+#saveRDS(corr.f,"/stornext/Genomics/data/CLL_venetoclax/workspace/SF3B1_mutation/analysis/Make_srt_step2_fig/mnn.rds")
+
+#add MNN corrected pca to sr
+mnn_pca <- reducedDim(corr.f, "corrected")
+colnames(mnn_pca) <- paste("PCA", 1:50, sep = "_")
+t[["mnn_pca"]] <- Seurat::CreateDimReducObject(embeddings = mnn_pca)
+
+#harmony batch correction
+t <- RunPCA(t, reduction.name = "uncorr_pca", reduction.key="uncorr_pca_")
+dims.to.use <- 20
+#t <- RunUMAP(t, reduction = "uncorr_pca", dims = 1:dims.to.use, reduction.name= "uncorr_umap", reduction.key = "uncorr_umap_")
+#DimPlot(object = t, reduction = "uncorr_umap", group.by = "orig.ident", cols=c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), order=T)
+
+theta.to.use <- 1
+library(harmony)
+t=RunHarmony(t,
+              group.by.vars="orig.ident",
+              reduction="uncorr_pca",
+              theta=theta.to.use,
+              plot_convergence=TRUE,
+              reduction.save="harmony_pca",
+              kmeans_init_nstart=1000,
+              kmeans_init_iter_max=500000)
+ElbowPlot(object = t, ndims=50, reduction="harmony_pca")
+
+t <- RunUMAP(t ,reduction = "harmony_pca", dims=1:dims.to.use, reduction.name = "harmony_umap", reduction.key = "harmony_umap_")
+DimPlot(object = t, reduction = "harmony_umap", group.by = "orig.ident", cols=c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), order=T)
+DimPlot(object = t, reduction = "harmony_umap", group.by = "stage", order=T)
+
+t <- FindNeighbors(t, reduction = "harmony_pca", dims = 1:dims.to.use, graph.name = "h")
+t <- FindClusters(t, graph.name = "h", resolution = 0.5)
+
+DimPlot(object = t, reduction = "harmony_umap", order = F, 
+        cols = c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), 
+        label = T)
+```
+
+```{r, fig.width=15, fig.height=5}
+VlnPlot(t, features = c("nCount_RNA", "nFeature_RNA", "percent.mt", "CD3E", "NKG7", "GNLY", "CD14", "CD8A", "NCAM1"), pt.size = 0, ncol = 3)
+#t <- subset(t, seurat_clusters %in% 0:7)
+```
+
+
+```{r, fig.width=5.5, fig.height=5}
+t <- readRDS("cll_dtu_fig/t_all.rds")
+DimPlot(object = t, reduction = "harmony_umap", order = F, pt.size = 0.5, raster = F, 
+        cols = c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), 
+        label = T, label.box = T, label.color = "white", label.size = 7)
+ggsave("cll_dtu_fig/t_cell_umap.pdf", width = 5.5, height = 5)
+```
+
+```{r, fig.width=10, fig.height=10}
+t$stage <- "R"
+t$stage[t$orig.ident %in% c("HD11", "HD12", "HD14")] <- "HD"
+t$stage[t$orig.ident %in% c("CLL156", "CLL5309", "CLL5602", "CLL5305", "CLL5306", "CLL108")] <- "S"
+t$stage[t$orig.ident %in% c("CLL63i", "CLL141i", "CLL170i")] <- "RB"
+t$stage <- factor(t$stage, levels = c("S", "R", "RB", "HD"))
+
+DimPlot(object = t, reduction = "harmony_umap", order = F, pt.size = 0.3, raster = F, split.by = "stage", 
+        cols = c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)), 
+        label = T, label.size = 5, ncol = 2)
+ggsave("cll_dtu_fig/t_cell_umap_split.pdf", width = 5, height = 5)
+```
+
+```{r, fig.width=5, fig.height=5}
+VlnPlot(t, features = c("CD3E", "CD8A", "CD4"), pt.size = 0, ncol = 1, 
+        cols = c(ggsci::pal_npg(alpha=0.7)(8), ggsci::pal_nejm(alpha=0.7)(8), ggsci::pal_jama(alpha = 0.7)(8)))
+ggsave("cll_dtu_fig/t_cell_vlnplot.pdf", width = 5.5, height = 5)
+#t <- subset(t, seurat_clusters %in% 0:7)
+```
+
+```{r}
+saveRDS(t, "cll_dtu_fig/t_all.rds")
+```
+
+
+
+##make heatmap
+```{r, fig.width=8, fig.height=3}
+DefaultAssay(t) <- "tr"
+anno_df <- data.frame(rownames = rownames(t))
+anno_df$gene_id <- sapply(strsplit(anno_df$rownames, "-"), function(x){x[1]})
+anno_df$tr_name <- sapply(strsplit(anno_df$rownames, "-"), function(x){paste(x[2:length(x)], collapse = "-")})
+
+select_row <- anno_df$rownames[anno_df$gene_id %in% c("ENSG00000115524.16", "ENSG00000010671.15")]
+mtx <- GetAssayData(t)
+mtx <- mtx[select_row, ]
+t[["target"]] <- CreateAssayObject(counts = mtx)
+
+anno_df <- data.frame(rownames = rownames(mtx))
+anno_df$gene_id <- sapply(strsplit(anno_df$rownames, "-"), function(x){x[1]})
+anno_df$tr_name <- sapply(strsplit(anno_df$rownames, "-"), function(x){paste(x[2:length(x)], collapse = "-")})
+
+
+DefaultAssay(t) <- "target"
+t <- NormalizeData(t)
+t <- ScaleData(t)
+
+mtx <- GetAssayData(t, slot = "count")
+
+#count how many cells that we capture the BTK isform
+
+anno_df <- data.frame(rownames = rownames(mtx))
+anno_df$gene_id <- sapply(strsplit(anno_df$rownames, "-"), function(x){x[1]})
+anno_df$tr_name <- sapply(strsplit(anno_df$rownames, "-"), function(x){paste(x[2:length(x)], collapse = "-")})
+
+##select only the SF3B1 isoform
+mtx <- mtx[grep("ENSG00000115524.16", rownames(mtx)), ]
+
+df <- data.frame(bc = names(colSums(mtx)), 
+                 count = colSums(mtx))
+df$sample <- sapply(strsplit(df$bc, "_"), function(x){x[1]})
+df$category <- "RaCHseq"
+
+sr_mtx <- GetAssayData(t, assay = "RNA", slot = "count")
+tmp <- data.frame(bc = names(colSums(sr_mtx)),
+                  count = sr_mtx["SF3B1", ])
+tmp$sample <- sapply(strsplit(tmp$bc, "_"), function(x){x[1]})
+tmp$category <- "scRNAseq"
+
+plot_df <- rbind(df, tmp)
+plot_df$category <- factor(plot_df$category, levels = c("scRNAseq", "RaCHseq"))
+
+ggplot(plot_df, aes(x = count, fill = category)) + 
+  geom_histogram(binwidth = 1, position = "identity", alpha = 0.5) + 
+  xlim(c(0, 100)) + 
+  ylim(c(0,15000)) +
+  xlab("SF3B1 UMIs") + 
+  ylab("Cell numbers") +
+  theme_bw() + 
+  scale_fill_manual(values = c("grey30", "orange")) + 
+  geom_vline(xintercept = 5, linetype = "dashed")
+```
+
+```{r, fig.width=8, fig.height=3}
+#try to rm cell with less than 5 reads
+df <- df[df$count >= 0, ]
+table(df$sample)
+
+
+t <- t[, df$bc]
+
+mtx <- GetAssayData(t, slot = "count")
+
+btk_mtx <- mtx[anno_df$rownames[anno_df$gene_id == "ENSG00000115524.16"], ]
+btk_mtx <- t(as.matrix(btk_mtx))
+
+colnames(btk_mtx) <- sapply(strsplit(colnames(btk_mtx), "-"), function(x){paste(x[2:length(x)], collapse = "_")})
+btk_mtx <- as.data.frame(btk_mtx)
+btk_mtx$sample <- sapply(strsplit(rownames(btk_mtx), "_"), function(x){x[1]})
+
+#change the sample names to alisa number
+pt_table <- read.csv("sf3b1_in_t_fig/patient_number.csv", header = F)
+colnames(pt_table) <- c("sample", "alias")
+btk_mtx$alias <- pt_table$alias[match(btk_mtx$sample, pt_table$sample)]
+btk_mtx$sample <- btk_mtx$alias
+btk_mtx$alias <- NULL
+
+btk_mtx <- btk_mtx %>% group_by(sample) %>% summarise_all(mean)
+btk_mtx <- as.data.frame(btk_mtx)
+rownames(btk_mtx) <- btk_mtx$sample
+btk_mtx$sample <- NULL
+
+btk_mtx <- t(btk_mtx)
+btk_mtx <- as.data.frame(btk_mtx)
+
+#rm the artefacts in isoform
+btk_mtx <- btk_mtx[!grepl("197405126", rownames(btk_mtx)), ]
+#btk_mtx <- btk_mtx[!grepl("197391980_197398772_1", rownames(btk_mtx)), ]
+
+top_tr <- 5
+names(sort(rowSums(btk_mtx)/21, decreasing = T))[1:top_tr]
+plot_df <- btk_mtx[names(sort(rowSums(btk_mtx), decreasing = T))[1:top_tr], ]
+plot_df <- scale(plot_df, center = F)
+######
+anno_df <- data.frame(sample = colnames(plot_df))
+rownames(anno_df) <- anno_df$sample
+
+anno_df$stage <- "VEN-R"
+anno_df$stage[anno_df$sample %in% c("CLL3-S","CLL26-S","CLL6-S","CLL7-S","CLL16-S","CLL23-S")] <- "S"
+anno_df$stage[anno_df$sample %in% c("HD11", "HD12", "HD14")] <- "HD"
+anno_df$stage[anno_df$sample %in% c("CLL2-RB", "CLL5-RB", "CLL23-RB")] <- "VEN-RB"
+anno_df$stage <- factor(anno_df$stage, levels = c("S", "VEN-R", "VEN-RB", "HD"))
+anno_df$sample <- NULL
+
+#anno_df$group <- "WT"
+#anno_df$group[anno_df$sample %in% c("CLL156", "CLL153", "CLL5306", "CLL155", "CLL318")] <- "SF3B1_mut"
+#anno_df$group <- factor(anno_df$group, levels = c("SF3B1_mut", "WT"))
+
+#alias_order <- df$alias[order(df$nCell, decreasing = T)]
+#alias_order_adj <- alias_order[c(1:4, 6:16, 18:20, 17, 5, 21) ]
+alias_order_adj <- c("CLL3-S","CLL26-S","CLL6-S","CLL7-S","CLL16-S","CLL23-S",
+                     "CLL3-R", "CLL26-R", "CLL2-R", "CLL5-R", "CLL6-R", "CLL7-R", "CLL16-R", "CLL17-R", "CLL23-R", 
+                     "CLL2-RB", "CLL5-RB", "CLL23-RB", 
+                     "HD11", "HD12", "HD14")
+
+
+ht_data <- pheatmap::pheatmap(plot_df[, alias_order_adj], cluster_cols = F, annotation_col = anno_df, treeheight_row = 0, gaps_col = c(6, 15, 18), 
+                              cluster_rows = F, 
+                   filename = "cll_dtu_fig/t_cell_sf3b1_hm.pdf",
+                   width = 8, height = 3)
+```
+
+
+
+```{r, fig.width=5, fig.height=5}
+DefaultAssay(t) <- "target"
+t <- NormalizeData(t, normalization.method = "CLR")
+t <- ScaleData(t)
+
+FeaturePlot(t, reduction = "harmony_umap", features = c("ENSG00000115524.16-ENST00000487698.5"), min.cutoff = "q2",max.cutoff = "q98", order = T, cols = c("lightgrey", "grey30"), pt.size = 0.5, raster = F)
+ggsave("cll_dtu_fig/t_cell_short_sf3b1_isoform.pdf", width = 5, height = 5)
+```
+
+```{r, fig.width=5, fig.height=5}
+FeaturePlot(t, reduction = "harmony_umap", features = c("ENSG00000115524.16-ENST00000335508.10"), min.cutoff = "q2",max.cutoff = "q98", order = T, cols = c("lightgrey", "grey30"), pt.size = 0.5, raster = F)
+ggsave("cll_dtu_fig/t_cell_primary_sf3b1_isoform.pdf", width = 5, height = 5)
+```
